@@ -3,6 +3,20 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-06-06
+
+### Added
+- **Unified suite theme** — dark + navy styling shared across the suite, plus a cross-app sidebar
+  **suite navigator** to jump between the apps.
+- **Prioritized recovery work-queue** — actionable (well × recoverable cause) items ranked by
+  **recoverable $ ÷ MTTR**, each with a suggested action and a **deep-link to AFE Copilot**.
+- **MTTR-by-cause bar chart**.
+- **Shared fleet registry** — Permian field/formation identity is now consistent across the suite.
+
+### Changed
+- **Robustness:** empty-frame guard in `recovery_opportunity`; swept the deprecated
+  `use_container_width` (→ `width="stretch"`); requires `streamlit>=1.50`.
+
 ## [0.1.0] — 2026-06-04
 
 Initial release — base-management / lost-oil accounting.

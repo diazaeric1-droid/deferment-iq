@@ -1,5 +1,5 @@
 # Runtime deps for the Streamlit demo / HF Space (union of core + UI).
-streamlit>=1.31.0
+streamlit>=1.50
 plotly>=5.18.0
 pandas>=2.2.0
 numpy>=1.26.0

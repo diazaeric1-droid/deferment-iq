@@ -26,16 +26,21 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+import theme
 from src import __version__
 from src import analytics as A
 from src.data_loader import load_events, load_fleet
 from src.deferment import classify_events, compute_deferment
 from src.narrator import MissingAPIKey, render_review_markdown, write_review
 
-st.set_page_config(page_title="Deferment IQ", page_icon="🛢️", layout="wide")
-st.title(f"Deferment IQ  `v{__version__}`")
-st.caption("Base management / lost-oil accounting — where are the barrels going, what's it costing, "
-           "and what's recoverable. Built by an ex-OXY / ex-Shell Staff Production Engineer.")
+theme.setup_page("Deferment IQ", icon="🛢️")
+theme.suite_nav("deferment")
+theme.header(
+    "Deferment IQ",
+    subtitle="Base management / lost-oil accounting — where are the barrels going, what's it costing, "
+             "and what's recoverable. Built by an ex-OXY / ex-Shell Staff Production Engineer.",
+    chips=[(f"v{__version__}", "ver"), ("~92% reason-code acc", "eval")],
+)
 
 with st.expander(f"🆕 What is this / v{__version__}"):
     st.markdown(
@@ -46,7 +51,16 @@ with st.expander(f"🆕 What is this / v{__version__}"):
         "- **The VP views** — deferment waterfall, Pareto of $ by cause, worst-offender wells, MTTR, and "
         "the **recoverable** opportunity (excludes planned + reservoir, which you can't get back).\n"
         "- **Capture rate** flags uncaptured (un-coded) deferment — a real data-quality gap to close.\n"
-        "- Deterministic engine; the LLM only classifies the messy tail and narrates. Bring your own key."
+        "- Deterministic engine; the LLM only classifies the messy tail and narrates. Bring your own key.\n"
+        "\n"
+        "**New in v0.2.0:**\n"
+        "- **Prioritized recovery work-queue** — actionable well × recoverable-cause items ranked by "
+        "**recoverable $ ÷ MTTR**, each with a suggested action and a deep-link to AFE Copilot.\n"
+        "- **MTTR-by-cause** bar chart.\n"
+        "- Unified dark + navy **suite theme** + a cross-app sidebar **suite navigator**.\n"
+        "- **Shared fleet registry** — consistent Permian field/formation identity across the suite.\n"
+        "- Robustness: empty-frame guard in recovery opportunity; swept deprecated "
+        "`use_container_width`; `streamlit>=1.50`."
     )
 
 DATA = REPO_ROOT / "data" / "synthetic"
@@ -92,8 +106,12 @@ k = A.fleet_kpis(daily, price)
 pareto = A.pareto_by_cause(daily)
 top = A.top_wells(daily, 10)
 rec = A.recovery_opportunity(daily)
+queue = A.recovery_queue(daily, evc, price)
 
-tab_review, tab_wells, tab_eval = st.tabs(["📋 Base-Management Review", "🔧 Well drill-in", "🎯 Classifier eval"])
+AFE_COPILOT_URL = "https://diazaeric1-afe-copilot.hf.space"
+
+tab_review, tab_queue, tab_wells, tab_eval = st.tabs(
+    ["📋 Base-Management Review", "🔧 Recovery queue", "🔬 Well drill-in", "🎯 Classifier eval"])
 
 # ── Review tab ──────────────────────────────────────────────────────────────
 with tab_review:
@@ -115,24 +133,21 @@ with tab_review:
             orientation="v",
             measure=["absolute"] + ["relative"] * (len(wf) - 2) + ["total"],
             x=[s["label"] for s in wf], y=[s["value"] for s in wf],
-            connector={"line": {"color": "#bbb"}},
-            decreasing={"marker": {"color": "#C0504D"}},
-            increasing={"marker": {"color": "#4F81BD"}},
-            totals={"marker": {"color": "#1F3A5F"}}))
-        fig.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(fig, use_container_width=True)
+            connector={"line": {"color": theme.GREY}},
+            decreasing={"marker": {"color": theme.RED}},
+            increasing={"marker": {"color": theme.BLUE}},
+            totals={"marker": {"color": theme.NAVY}}))
+        st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
     with right:
         st.subheader("Where the barrels go — $ by cause")
         if len(pareto):
             pf = go.Figure()
             pf.add_bar(x=pareto["label"], y=pareto["deferred_usd"], name="Deferred $",
-                       marker_color=["#4F81BD" if r else "#9b9b9b" for r in pareto["recoverable"]])
+                       marker_color=[theme.BLUE if r else theme.GREY for r in pareto["recoverable"]])
             pf.add_scatter(x=pareto["label"], y=pareto["cum_pct"], name="Cumulative %",
-                           yaxis="y2", line=dict(color="#C0504D"))
-            pf.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0),
-                             yaxis2=dict(overlaying="y", side="right", range=[0, 100], title="cum %"),
-                             legend=dict(orientation="h"))
-            st.plotly_chart(pf, use_container_width=True)
+                           yaxis="y2", line=dict(color=theme.RED))
+            pf.update_layout(yaxis2=dict(overlaying="y", side="right", range=[0, 100], title="cum %"))
+            st.plotly_chart(theme.style_fig(pf, height=380), width="stretch")
             st.caption("Blue = recoverable · grey = planned/reservoir (not recoverable).")
 
     st.subheader("Worst-offender wells")
@@ -141,7 +156,7 @@ with tab_review:
     disp["deferred_bbl"] = disp["deferred_bbl"].map(lambda v: f"{v:,.0f}")
     disp["uptime_pct"] = disp["uptime_pct"].map(lambda v: f"{v:.0f}%")
     disp.columns = ["Well", "Deferred bbl", "Deferred $", "Dominant cause", "Uptime"]
-    st.dataframe(disp, use_container_width=True, hide_index=True)
+    st.dataframe(disp, width="stretch", hide_index=True)
 
     mc1, mc2 = st.columns(2)
     with mc1:
@@ -152,14 +167,18 @@ with tab_review:
             st.dataframe(mm[["label", "n_events", "mttr_days", "total_event_days"]]
                          .rename(columns={"label": "Cause", "n_events": "Events",
                                           "mttr_days": "MTTR (d)", "total_event_days": "Down-days"}),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
+            ms = m.sort_values("mttr_days")
+            mf = go.Figure(go.Bar(x=ms["mttr_days"], y=ms["label"], orientation="h",
+                                  marker_color=theme.AMBER))
+            mf.update_layout(xaxis_title="MTTR (days)")
+            st.plotly_chart(theme.style_fig(mf, height=260, legend=False), width="stretch")
     with mc2:
         st.subheader("Deferment trend (weekly bbl)")
         tr = A.deferment_trend(daily, "W")
         tf = go.Figure(go.Scatter(x=tr["date"], y=tr["deferred_bbl"], fill="tozeroy",
-                                  line=dict(color="#C0504D")))
-        tf.update_layout(height=260, margin=dict(l=0, r=0, t=10, b=0))
-        st.plotly_chart(tf, use_container_width=True)
+                                  line=dict(color=theme.RED)))
+        st.plotly_chart(theme.style_fig(tf, height=260, legend=False), width="stretch")
 
     st.divider()
     st.subheader("📝 Senior-PE base-management review")
@@ -177,6 +196,76 @@ with tab_review:
                     "sidebar for the Senior-PE narrated version.")
             st.markdown(render_review_markdown(k, pareto, top, rec))
 
+# ── Recovery queue tab ────────────────────────────────────────────────────────
+with tab_queue:
+    st.subheader("Prioritized recovery work-queue")
+    st.caption(
+        "From *where are the barrels lost* to *what to do next, what it's worth, who acts* — "
+        "the **Quantify → Authorize** handoff. One actionable item per (well, recoverable cause); "
+        "planned work and reservoir/watering-out are excluded (you can't get those barrels back). "
+        "Ranked by **priority_score = recoverable $ ÷ MTTR (days)** — value per day-to-restore, so "
+        "a quick high-value win outranks a slow one of similar size.")
+
+    if not len(queue):
+        st.info("No recoverable deferment in the current period — nothing to queue.")
+    else:
+        total_rec_usd = float(queue["recoverable_usd"].sum())
+        n_items = int(len(queue))
+        # fastest high-value win = top of the priority ranking (already $/day)
+        toprow = queue.iloc[0]
+
+        kc = st.columns(3)
+        kc[0].metric("Total recoverable", f"${total_rec_usd:,.0f}",
+                     help="Sum of recoverable $ across every queued item.")
+        kc[1].metric("Actionable items", f"{n_items}",
+                     help="Distinct (well, recoverable cause) interventions.")
+        kc[2].metric("Fastest high-value win",
+                     f"{toprow['well_id']} · {toprow['cause']}",
+                     f"${toprow['recoverable_usd']:,.0f} · {toprow['mttr_days']:.1f}d",
+                     help="Highest value-per-day-to-restore item — do this first.")
+
+        # ── horizontal bar: top ~12 by recoverable $, colored by cause ──────────
+        bar = queue.head(12).iloc[::-1]   # reverse so the biggest sits on top
+        causes = list(dict.fromkeys(queue["cause"]))   # stable cause order for colors
+        cmap = {c: theme.COLORWAY[i % len(theme.COLORWAY)] for i, c in enumerate(causes)}
+        bf = go.Figure()
+        for c in causes:
+            sub = bar[bar["cause"] == c]
+            if not len(sub):
+                continue
+            bf.add_bar(
+                y=[f"{w} · {c}" for w in sub["well_id"]], x=sub["recoverable_usd"],
+                name=c, orientation="h", marker_color=cmap[c],
+                hovertemplate="%{y}<br>$%{x:,.0f}<extra></extra>")
+        bf.update_layout(barmode="stack", xaxis_title="Recoverable $",
+                         title="Top recovery opportunities by $ (colored by cause)")
+        st.plotly_chart(theme.style_fig(bf, height=420), width="stretch")
+
+        # ── the ranked work-queue table (formatted) ────────────────────────────
+        disp = queue.copy()
+        disp.insert(0, "#", range(1, len(disp) + 1))
+        disp["recoverable_usd"] = disp["recoverable_usd"].map(lambda v: f"${v:,.0f}")
+        disp["recoverable_bbl"] = disp["recoverable_bbl"].map(lambda v: f"{v:,.0f}")
+        disp["mttr_days"] = disp["mttr_days"].map(lambda v: f"{v:.1f}")
+        disp["priority_score"] = disp["priority_score"].map(lambda v: f"{v:,.0f}")
+        disp = disp[["#", "well_id", "cause", "suggested_action",
+                     "recoverable_bbl", "recoverable_usd", "mttr_days", "priority_score"]]
+        disp.columns = ["#", "Well", "Cause", "Suggested action",
+                        "Recoverable bbl", "Recoverable $", "MTTR (d)", "Priority ($/day)"]
+        st.dataframe(disp, width="stretch", hide_index=True)
+
+        st.divider()
+        st.subheader("Authorize the top interventions")
+        st.caption("Each item is sized and ready to hand to capital authorization.")
+        for _, r in queue.head(5).iterrows():
+            st.markdown(
+                f"**{r['well_id']} — {r['cause']}** · {r['suggested_action']} · "
+                f"recover **{r['recoverable_bbl']:,.0f} bbl (${r['recoverable_usd']:,.0f})**, "
+                f"~{r['mttr_days']:.1f}-day restore — "
+                f"[authorize the intervention in AFE Copilot ↗]({AFE_COPILOT_URL})")
+        st.caption("Deep-links open AFE Copilot in a new tab to draft the Authorization for Expenditure.")
+
+
 # ── Well drill-in tab ───────────────────────────────────────────────────────
 with tab_wells:
     wsel = st.selectbox("Inspect well", sorted(fleet.keys()))
@@ -184,17 +273,16 @@ with tab_wells:
     wk = wd["total_def"].sum()
     st.metric(f"{wsel} — deferred", f"{wk:,.0f} bbl  (${wk * price:,.0f})")
     fig = go.Figure()
-    fig.add_scatter(x=wd["date"], y=wd["potential"], name="Potential", line=dict(color="#4F81BD", dash="dash"))
-    fig.add_scatter(x=wd["date"], y=wd["bopd"], name="Actual BOPD", line=dict(color="#1F3A5F"))
-    fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred", marker_color="#C0504D", opacity=0.5)
-    fig.update_layout(height=380, margin=dict(l=0, r=0, t=10, b=0), legend=dict(orientation="h"))
-    st.plotly_chart(fig, use_container_width=True)
+    fig.add_scatter(x=wd["date"], y=wd["potential"], name="Potential", line=dict(color=theme.BLUE, dash="dash"))
+    fig.add_scatter(x=wd["date"], y=wd["bopd"], name="Actual BOPD", line=dict(color=theme.NAVY))
+    fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred", marker_color=theme.RED, opacity=0.5)
+    st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
     ev = evc[evc["well_id"] == wsel] if "well_id" in evc.columns else pd.DataFrame()
     if len(ev):
         st.subheader("Events for this well")
         show = ev[["start_date", "end_date", "note", "reason_key"]].copy()
         show.columns = ["Start", "End", "Operator note", "Classified cause"]
-        st.dataframe(show, use_container_width=True, hide_index=True)
+        st.dataframe(show, width="stretch", hide_index=True)
 
 # ── Eval tab ────────────────────────────────────────────────────────────────
 with tab_eval:
@@ -212,7 +300,7 @@ with tab_eval:
         pc = pd.DataFrame(rows)
         for col in ("Precision", "Recall", "F1"):
             pc[col] = pc[col].map(lambda v: f"{v:.2f}" if isinstance(v, (int, float)) else "—")
-        st.dataframe(pc, use_container_width=True, hide_index=True)
+        st.dataframe(pc, width="stretch", hide_index=True)
         st.caption("Residual misses are the deliberately vague notes (e.g. \"well down, see foreman\") — "
                    "exactly where the optional LLM classifier earns its keep.")
     else:

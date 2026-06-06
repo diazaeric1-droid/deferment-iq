@@ -7,7 +7,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .reason_codes import label_for
+from .reason_codes import label_for, suggested_action
 
 
 def fleet_kpis(daily: pd.DataFrame, price_per_bbl: float = 70.0) -> dict:
@@ -104,6 +104,8 @@ def mttr_by_cause(events_classified: pd.DataFrame) -> pd.DataFrame:
 def recovery_opportunity(daily: pd.DataFrame) -> dict:
     """Actionable opportunity = deferred $ in RECOVERABLE causes (excludes planned work
     and reservoir/watering-out, which you can't get back)."""
+    if daily.empty:
+        return {"recoverable_bbl": 0.0, "recoverable_usd": 0.0, "unclassified_usd": 0.0}
     loss = daily[daily["total_def"] > 1e-6]
     rec = loss[loss["recoverable"]]
     return {
@@ -111,6 +113,60 @@ def recovery_opportunity(daily: pd.DataFrame) -> dict:
         "recoverable_usd": float(rec["deferred_usd"].sum()),
         "unclassified_usd": float(loss[loss["reason_key"] == "unclassified"]["deferred_usd"].sum()),
     }
+
+
+RECOVERY_QUEUE_COLUMNS = [
+    "well_id", "cause", "reason_key", "recoverable_bbl", "recoverable_usd",
+    "mttr_days", "priority_score", "suggested_action",
+]
+
+
+def recovery_queue(daily: pd.DataFrame, events: pd.DataFrame | None = None,
+                   oil_price: float = 70.0) -> pd.DataFrame:
+    """Prioritized recovery work-queue: one actionable item per (well, recoverable cause).
+
+    Converts the deferment analytics from "where are barrels lost" into "what to do next,
+    what it's worth, who acts" — the Quantify→Authorize handoff. Only RECOVERABLE causes
+    are included; planned work and reservoir/watering-out (and unclassified) are excluded
+    because those barrels can't be recovered by an intervention.
+
+    Scoring
+    -------
+    Items are ranked by ``priority_score = recoverable_usd / max(mttr_days, 1)`` — value
+    per day-to-restore, so a quick high-$ win outranks a slow one of similar value (a
+    barrels-per-day-of-effort proxy). ``mttr_days`` is the mean-time-to-restore for that
+    cause from the event log (falls back to 1.0 day when no event history is available),
+    so the divisor never inflates or zeroes the score. Sorted by ``priority_score`` desc.
+
+    Returns columns: well_id, cause (label), reason_key, recoverable_bbl, recoverable_usd,
+    mttr_days, priority_score, suggested_action.
+    """
+    if daily is None or daily.empty:
+        return pd.DataFrame(columns=RECOVERY_QUEUE_COLUMNS)
+    loss = daily[(daily["total_def"] > 1e-6) & daily["recoverable"]]
+    if loss.empty:
+        return pd.DataFrame(columns=RECOVERY_QUEUE_COLUMNS)
+
+    q = loss.groupby(["well_id", "reason_key"]).agg(
+        recoverable_bbl=("total_def", "sum"),
+        recoverable_usd=("deferred_usd", "sum"),
+    ).reset_index()
+
+    # MTTR (days) per cause from the event log; default 1.0 day if unavailable.
+    mttr_map: dict[str, float] = {}
+    if events is not None and len(events):
+        m = mttr_by_cause(events)
+        if len(m):
+            mttr_map = dict(zip(m["reason_key"], m["mttr_days"]))
+    q["mttr_days"] = q["reason_key"].map(mttr_map).fillna(1.0).clip(lower=1.0)
+
+    # Re-price defensively if caller passes a different price than `daily` was built with.
+    q["priority_score"] = q["recoverable_usd"] / q["mttr_days"]
+    q["cause"] = q["reason_key"].map(label_for)
+    q["suggested_action"] = q["reason_key"].map(suggested_action)
+
+    q = q.sort_values("priority_score", ascending=False).reset_index(drop=True)
+    return q[RECOVERY_QUEUE_COLUMNS]
 
 
 def deferment_trend(daily: pd.DataFrame, freq: str = "W") -> pd.DataFrame:

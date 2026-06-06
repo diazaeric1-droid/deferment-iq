@@ -121,6 +121,22 @@ def label_for(key: str) -> str:
     return REASON_BY_KEY[key].label if key in REASON_BY_KEY else UNCLASSIFIED.label
 
 
+# Suggested first intervention per recoverable cause — what the field actually does to
+# get the barrels back. Drives the work-queue's `suggested_action` and the AFE deep-link.
+SUGGESTED_ACTION: dict[str, str] = {
+    "artificial_lift": "ESP / rod-pump workover",
+    "surface_facility": "Facility repair (separator/compressor/treater)",
+    "power": "Restore power / electrical repair",
+    "gathering_thirdparty": "Line-pressure / midstream coordination",
+    "wellbore": "Wellbore cleanout (scale/paraffin/sand)",
+    "weather": "Freeze protection / winterization",
+}
+
+
+def suggested_action(key: str) -> str:
+    return SUGGESTED_ACTION.get(key, "Investigate")
+
+
 def is_recoverable(key: str) -> bool:
     return REASON_BY_KEY[key].recoverable if key in REASON_BY_KEY else False
 
