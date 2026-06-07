@@ -47,8 +47,20 @@ from src.narrator import MissingAPIKey, render_review_markdown, write_review
 
 DATA = REPO_ROOT / "data" / "synthetic"
 WELLS = DATA / "wells"
+REAL_NDIC = REPO_ROOT / "data" / "real" / "ndic" / "production.csv"
 EVAL = REPO_ROOT / "evals" / "results" / "summary.json"
 AFE_COPILOT_URL = "https://diazaeric1-afe-copilot.hf.space"
+
+# Data-source toggle values (sidebar radio).
+SRC_SYNTHETIC = "Synthetic (demo)"
+SRC_REAL_NDIC = "Real — North Dakota (NDIC)"
+
+_BADGE_SYNTHETIC = ("synthetic",
+                    "Modeled fleet with reason-coded events + known ground truth "
+                    "(~92% classifier eval).")
+_BADGE_REAL = ("real",
+               "North Dakota (NDIC) public monthly filings — Bakken. Downtime from "
+               "days-produced; cause attribution N/A (no public reason codes).")
 
 
 # ---- bootstrap + cached loads ----------------------------------------------
@@ -61,8 +73,8 @@ def _bootstrap():
 
 @st.cache_data(show_spinner=False)
 def _load(price_per_bbl, use_llm_flag, has_key, byok_key):
-    """Cache the fleet load + classification + deferment compute. Keyed on the
-    LLM toggle + key presence so a deterministic run (no key) caches cleanly."""
+    """Cache the SYNTHETIC fleet load + classification + deferment compute. Keyed on
+    the LLM toggle + key presence so a deterministic run (no key) caches cleanly."""
     fleet = load_fleet(WELLS)
     events = load_events(DATA / "events.csv")
     client = None
@@ -75,6 +87,39 @@ def _load(price_per_bbl, use_llm_flag, has_key, byok_key):
 
 
 @st.cache_data(show_spinner=False)
+def _load_real_ndic(price_per_bbl):
+    """Cache the REAL North-Dakota (NDIC) load + deferment compute.
+
+    Monthly NDIC filings → the same fleet structure (rate from oil_bbl/days,
+    downtime from days-produced). There are NO public reason codes, so events is
+    empty and every lost barrel is 'uncoded' — the deferment QUANTITY is real, the
+    cause is N/A. Returns (fleet, empty_events, daily) to mirror ``_load``."""
+    from src.ndic import load_ndic_fleet
+    from src.data_loader import EVENT_COLUMNS
+    fleet = load_ndic_fleet(REAL_NDIC)
+    evc = pd.DataFrame(columns=[*EVENT_COLUMNS, "reason_key"])  # no real reason codes
+    daily = compute_deferment(fleet, evc, price_per_bbl=price_per_bbl)
+    return fleet, evc, daily
+
+
+def _resolve_source(data_source: str):
+    """Map the sidebar choice → (is_real, loader-callable, badge args).
+
+    Real is honored only when the local extract exists; otherwise we warn and fall
+    back to synthetic so the app always renders. The loader closes over the active
+    sidebar state already captured by ``_sidebar_controls``."""
+    if data_source == SRC_REAL_NDIC:
+        if REAL_NDIC.exists():
+            return True, "real", _BADGE_REAL
+        st.warning(
+            "Real — North Dakota (NDIC) selected, but no extract found at "
+            f"`{REAL_NDIC.relative_to(REPO_ROOT)}`. Falling back to the synthetic "
+            "demo fleet. See `data/real/ndic/README.md` to add a public NDIC "
+            "monthly extract (no API key needed).")
+    return False, "synthetic", _BADGE_SYNTHETIC
+
+
+@st.cache_data(show_spinner=False)
 def _fleet_well_ids() -> list[str]:
     """Sorted well ids for navigation wiring (cheap glob, no CSV parse)."""
     return sorted(p.stem for p in WELLS.glob("well_*.csv"))
@@ -82,10 +127,16 @@ def _fleet_well_ids() -> list[str]:
 
 # ---- shared helpers --------------------------------------------------------
 
-def _sidebar_controls() -> tuple[float, str, bool]:
-    """Render the shared sidebar settings and return (price, byok_key, use_llm)."""
+def _sidebar_controls() -> tuple[float, str, bool, str]:
+    """Render the shared sidebar settings and return (price, byok_key, use_llm, data_source)."""
     with st.sidebar:
         st.header("Settings")
+        data_source = st.radio(
+            "Data source", [SRC_SYNTHETIC, SRC_REAL_NDIC], index=0, key="data_source",
+            help="Synthetic = modeled fleet with reason-coded events + ground truth "
+                 "(powers the classifier eval). Real = North Dakota (NDIC) public "
+                 "monthly Bakken filings (no API key); downtime is real (days-produced) "
+                 "but there are no public reason codes, so cause attribution is N/A.")
         price = st.number_input("Realized oil price ($/bbl)", 20.0, 150.0, 70.0, 1.0,
                                 key="oil_price")
         byok_key = st.text_input(
@@ -95,8 +146,8 @@ def _sidebar_controls() -> tuple[float, str, bool]:
         use_llm = st.checkbox("🤖 Use LLM for reason-code classification", value=False,
                               key="use_llm",
                               help="Re-classify event notes with Claude (needs key). Default is the "
-                                   "deterministic rules classifier.")
-    return price, byok_key, use_llm
+                                   "deterministic rules classifier. Synthetic data only.")
+    return price, byok_key, use_llm, data_source
 
 
 def _back_to_overview():
@@ -154,15 +205,18 @@ def _build_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
 # =====================================================================
 
 def render_overview() -> None:
-    price, byok_key, use_llm = _sidebar_controls()
+    price, byok_key, use_llm, data_source = _sidebar_controls()
+    is_real, _src, badge = _resolve_source(data_source)
 
+    src_chip = ("North Dakota (NDIC) · real", "info") if is_real \
+        else ("~92% reason-code acc", "eval")
     theme.header(
         "Deferment IQ",
         subtitle="Base management / lost-oil accounting — where are the barrels going, what's it costing, "
                  "and what's recoverable. Built by an ex-OXY / ex-Shell Staff Production Engineer.",
-        chips=[(f"v{__version__}", "ver"), ("~92% reason-code acc", "eval"),
-               ("fleet explorer", "info")],
+        chips=[(f"v{__version__}", "ver"), src_chip, ("fleet explorer", "info")],
     )
+    theme.data_badge(*badge)
 
     with st.expander(f"🆕 What is this / v{__version__}"):
         st.markdown(
@@ -185,7 +239,10 @@ def render_overview() -> None:
             "unified suite theme + cross-app navigator."
         )
 
-    fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)
+    if is_real:
+        fleet, evc, daily = _load_real_ndic(price)
+    else:
+        fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)
     k = A.fleet_kpis(daily, price)
     pareto = A.pareto_by_cause(daily)
     top = A.top_wells(daily, 10)
@@ -196,25 +253,31 @@ def render_overview() -> None:
         ["📋 Base-Management Review", "🔧 Recovery queue", "📋 Fleet table", "🎯 Classifier eval"])
 
     with tab_review:
-        _review_section(k, pareto, top, rec, daily, evc, price, byok_key)
+        _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real)
     with tab_queue:
-        _queue_section(queue)
+        _queue_section(queue, is_real)
     with tab_table:
-        _fleet_table_section(daily, price)
+        _fleet_table_section(daily, price, is_real)
     with tab_eval:
-        _eval_section()
+        _eval_section(is_real)
 
 
-def _review_section(k, pareto, top, rec, daily, evc, price, byok_key) -> None:
+def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=False) -> None:
     c = st.columns(5)
     c[0].metric("Production efficiency", f"{k['uptime_pct']:.1f}%", help="Actual ÷ potential")
     c[1].metric("Deferred", f"${k['deferred_usd']:,.0f}", f"{k['pct_deferred']:.1f}% of potential",
                 delta_color="inverse")
     c[2].metric("Deferred rate", f"{k['deferred_bopd_avg']:,.0f} BOPD")
-    c[3].metric("Recoverable opportunity", f"${rec['recoverable_usd']:,.0f}")
-    c[4].metric("Reason-code capture", f"{k['capture_rate_pct']:.0f}%",
-                delta=("coding gap" if k['capture_rate_pct'] < 90 else "good"),
-                delta_color=("inverse" if k['capture_rate_pct'] < 90 else "off"))
+    if is_real:
+        c[3].metric("Recoverable opportunity", "N/A", help="Needs reason codes — not in public data")
+        c[4].metric("Reason-code capture", "N/A",
+                    help="NDIC public filings carry no reason codes — cause attribution is N/A. "
+                         "The deferment QUANTITY (above) is real.")
+    else:
+        c[3].metric("Recoverable opportunity", f"${rec['recoverable_usd']:,.0f}")
+        c[4].metric("Reason-code capture", f"{k['capture_rate_pct']:.0f}%",
+                    delta=("coding gap" if k['capture_rate_pct'] < 90 else "good"),
+                    delta_color=("inverse" if k['capture_rate_pct'] < 90 else "off"))
 
     left, right = st.columns(2)
     with left:
@@ -229,9 +292,16 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key) -> None:
             increasing={"marker": {"color": theme.BLUE}},
             totals={"marker": {"color": theme.NAVY}}))
         st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
+        if is_real:
+            st.caption("Real data: the bridge is gross potential → **uncoded** deferment → actual "
+                       "(no per-cause split — public filings have no reason codes).")
     with right:
         st.subheader("Where the barrels go — $ by cause")
-        if len(pareto):
+        if is_real:
+            st.info("**Cause attribution N/A** — NDIC public monthly filings carry no reason "
+                    "codes or operator cause notes. The deferment **quantity** is real (from "
+                    "days-produced); the per-cause $-Pareto needs an operator's coded event log.")
+        elif len(pareto):
             pf = go.Figure()
             pf.add_bar(x=pareto["label"], y=pareto["deferred_usd"], name="Deferred $",
                        marker_color=[theme.BLUE if r else theme.GREY for r in pareto["recoverable"]])
@@ -246,14 +316,21 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key) -> None:
     disp["deferred_usd"] = disp["deferred_usd"].map(lambda v: f"${v:,.0f}")
     disp["deferred_bbl"] = disp["deferred_bbl"].map(lambda v: f"{v:,.0f}")
     disp["uptime_pct"] = disp["uptime_pct"].map(lambda v: f"{v:.0f}%")
+    if is_real:
+        disp["top_cause"] = "N/A (uncoded)"
     disp.columns = ["Well", "Deferred bbl", "Deferred $", "Dominant cause", "Uptime"]
     st.dataframe(disp, width="stretch", hide_index=True)
+    if is_real:
+        st.caption("Ranked by **real** deferred barrels/$ (potential vs. actual). Dominant "
+                   "cause is N/A — no public reason codes.")
 
     mc1, mc2 = st.columns(2)
     with mc1:
         st.subheader("MTTR by cause (days)")
         m = A.mttr_by_cause(evc)
-        if len(m):
+        if is_real:
+            st.info("MTTR needs a coded event log (start/end + cause) — N/A on NDIC public data.")
+        elif len(m):
             mm = m.copy(); mm["mttr_days"] = mm["mttr_days"].map(lambda v: f"{v:.1f}")
             st.dataframe(mm[["label", "n_events", "mttr_days", "total_event_days"]]
                          .rename(columns={"label": "Cause", "n_events": "Events",
@@ -273,7 +350,12 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key) -> None:
 
     st.divider()
     st.subheader("📝 Senior-PE base-management review")
-    if st.button("Generate review", type="primary"):
+    if is_real:
+        st.info("The narrated review summarizes deferment **by cause** and the **recoverable** "
+                "opportunity — both N/A on NDIC public data (no reason codes). The real numbers "
+                "are the production-efficiency and deferred-barrel/$ KPIs above. Switch to the "
+                "**Synthetic (demo)** data source for the full reason-coded VP review.")
+    elif st.button("Generate review", type="primary"):
         try:
             client = None
             if byok_key:
@@ -288,7 +370,15 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key) -> None:
             st.markdown(render_review_markdown(k, pareto, top, rec))
 
 
-def _queue_section(queue) -> None:
+def _queue_section(queue, is_real=False) -> None:
+    if is_real:
+        st.subheader("Prioritized recovery work-queue")
+        st.info("**Cause attribution N/A — no public reason codes.** The recovery queue ranks "
+                "actionable items per (well, **recoverable cause**), which requires the operator's "
+                "coded downtime log. NDIC public filings give real deferment **quantity** (from "
+                "days-produced) but no cause, so there's nothing to attribute or authorize here. "
+                "Switch to **Synthetic (demo)** for the full Quantify → Authorize work-queue.")
+        return
     st.subheader("Prioritized recovery work-queue")
     st.caption(
         "From *where are the barrels lost* to *what to do next, what it's worth, who acts* — "
@@ -355,9 +445,59 @@ def _queue_section(queue) -> None:
     st.caption("Deep-links open AFE Copilot in a new tab to draft the Authorization for Expenditure.")
 
 
-def _fleet_table_section(daily, price) -> None:
+def _build_real_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
+    """One row per NDIC well from the REAL extract — real volumes/uptime, real
+    identity (operator/field/formation from the filing), cause N/A.
+
+    Built directly off ``daily`` + the NDIC well meta (NOT the Permian registry,
+    which would stamp placeholder Midland/Delaware metadata onto Bakken wells)."""
+    if daily is None or not len(daily):
+        return pd.DataFrame()
+    meta = {}
+    try:
+        from src.ndic import ndic_well_meta
+        m = ndic_well_meta(REAL_NDIC)
+        meta = m.set_index("well_id").to_dict("index")
+    except Exception:
+        meta = {}
+    g = daily.groupby("well_id").agg(
+        deferred_bbl=("total_def", "sum"), deferred_usd=("deferred_usd", "sum"),
+        potential=("potential", "sum"), actual=("bopd", "sum")).reset_index()
+    g["uptime_pct"] = (g["actual"] / g["potential"] * 100.0).where(g["potential"] > 0, 100.0)
+    rows = []
+    for _, r in g.iterrows():
+        info = meta.get(r["well_id"], {})
+        rows.append({
+            "Well": r["well_id"],
+            "Operator": info.get("operator", "—"),
+            "Field": info.get("field", "—"),
+            "Formation": info.get("formation", "—"),
+            "Deferred bbl": round(float(r["deferred_bbl"]), 0),
+            "Deferred $": round(float(r["deferred_usd"]), 0),
+            "Dominant cause": "N/A (uncoded)",
+            "Uptime %": round(float(r["uptime_pct"]), 1),
+        })
+    return pd.DataFrame(rows).sort_values("Deferred $", ascending=False).reset_index(drop=True)
+
+
+def _fleet_table_section(daily, price, is_real=False) -> None:
     st.caption("One row per well — sort any column. Open a well from the **Wells** section in "
                "the sidebar to drill in (potential-vs-actual, deferred bars, events, recovery items).")
+    if is_real:
+        table = _build_real_fleet_table(daily, price)
+        if table.empty:
+            st.info("No fleet data available.")
+            return
+        st.dataframe(
+            table, width="stretch", hide_index=True,
+            column_config={
+                "Deferred $": st.column_config.NumberColumn(format="$%d"),
+                "Deferred bbl": st.column_config.NumberColumn(format="%d"),
+                "Uptime %": st.column_config.NumberColumn(format="%.1f%%"),
+            })
+        st.caption("Real NDIC data: volumes + uptime are real; **Dominant cause is N/A** (no "
+                   "public reason codes), so there's no recoverable-$/capture-% column.")
+        return
     table = _build_fleet_table(daily, price)
     if table.empty:
         st.info("No fleet data available.")
@@ -374,8 +514,14 @@ def _fleet_table_section(daily, price) -> None:
         })
 
 
-def _eval_section() -> None:
+def _eval_section(is_real=False) -> None:
     st.subheader("Reason-code classifier — eval vs. ground-truth causes")
+    if is_real:
+        st.info("**Cause attribution N/A — no public reason codes.** NDIC public filings carry no "
+                "operator cause notes, so there's no ground truth to score a classifier against on "
+                "real data. The eval below is measured on the **synthetic** reason-coded set (its "
+                "ground-truth labels) — the credential for the classifier; it does not run on the "
+                "real Bakken extract.")
     st.caption("The event log carries a ground-truth cause the classifier never sees. The deterministic "
                "rules classifier is scored on it (precision/recall/F1 + accuracy). A CI gate fails the "
                "build under 80%. Run `python -m evals.run_evals` to refresh.")
@@ -400,8 +546,74 @@ def _eval_section() -> None:
 # PAGE: per-well drill-down
 # =====================================================================
 
+def _render_well_real(well_id: str, price: float) -> None:
+    """Per-well drill-down on the REAL NDIC extract: real potential-vs-actual +
+    deferred bars from monthly filings, real identity (operator/field/formation),
+    cause attribution N/A (no public reason codes)."""
+    fleet, evc, daily = _load_real_ndic(price)
+    info = {}
+    try:
+        from src.ndic import ndic_well_meta
+        info = ndic_well_meta(REAL_NDIC).set_index("well_id").to_dict("index").get(well_id, {})
+    except Exception:
+        info = {}
+
+    name = info.get("well_name", well_id)
+    sub = " · ".join(str(v) for v in (info.get("operator"), info.get("field"),
+                                      info.get("formation")) if v)
+    theme.header(f"{well_id} · {name}",
+                 subtitle=sub or "North Dakota (NDIC) public monthly filing",
+                 chips=[(f"v{__version__}", "ver"), ("NDIC · real", "info")])
+    theme.data_badge(*_BADGE_REAL)
+    _back_to_overview()
+
+    wd = daily[daily["well_id"] == well_id] if len(daily) else daily.iloc[0:0]
+    if not len(wd):
+        st.info(
+            f"**{well_id}** isn't in the NDIC extract. The per-well menu in the sidebar is keyed to "
+            "the synthetic demo fleet (`well_0NN`); the real NDIC wells live in the **Fleet table** "
+            "on the overview. Open the **Fleet overview** to browse the real wells, or switch the "
+            "**Data source** back to *Synthetic (demo)* to drill into this well.")
+        _back_to_overview()
+        return
+
+    deferred_bbl = float(wd["total_def"].sum())
+    potential = float(wd["potential"].sum())
+    actual = float(wd["bopd"].sum())
+    uptime = (actual / potential * 100.0) if potential > 0 else 100.0
+
+    m = st.columns(4)
+    m[0].metric("Deferred bbl", f"{deferred_bbl:,.0f}", help="Real — potential vs. actual")
+    m[1].metric("Deferred $", f"${deferred_bbl * price:,.0f}", delta_color="inverse")
+    m[2].metric("Uptime %", f"{uptime:.1f}%", help="Actual ÷ potential (downtime from days-produced)")
+    m[3].metric("Dominant cause", "N/A", help="No public reason codes — cause attribution N/A")
+
+    st.subheader("Potential vs. actual — deferred barrels (monthly)")
+    fig = go.Figure()
+    fig.add_scatter(x=wd["date"], y=wd["potential"], name="Potential",
+                    line=dict(color=theme.BLUE, dash="dash"))
+    fig.add_scatter(x=wd["date"], y=wd["bopd"], name="Actual BOPD",
+                    line=dict(color=theme.NAVY))
+    fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred",
+                marker_color=theme.RED, opacity=0.5)
+    st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
+    st.caption("Monthly cadence: rate = oil_bbl ÷ days-produced; downtime = days_in_month − "
+               "days-produced. Volumes and downtime are real; **cause is N/A** (no public reason codes).")
+
+    st.subheader("Recovery items for this well")
+    st.info("**Cause attribution N/A — no public reason codes.** Recovery items require a coded "
+            "cause to attribute and authorize; NDIC public data has none. The deferment quantity "
+            "above is real.")
+    _back_to_overview()
+
+
 def render_well(well_id: str) -> None:
-    price, byok_key, use_llm = _sidebar_controls()
+    price, byok_key, use_llm, data_source = _sidebar_controls()
+    is_real, _src, _badge = _resolve_source(data_source)
+    if is_real:
+        _render_well_real(well_id, price)
+        return
+
     fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)
     meta = fleet_registry.get(well_id)
 
@@ -410,6 +622,7 @@ def render_well(well_id: str) -> None:
         subtitle=f"{meta.lift} · {meta.basin} · {meta.formation} · {meta.area}",
         chips=[(f"v{__version__}", "ver"), (meta.peer_group, "info")],
     )
+    theme.data_badge(*_BADGE_SYNTHETIC)
     theme.well_cross_links("deferment", well_id)
     _back_to_overview()
 

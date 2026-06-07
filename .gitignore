@@ -11,4 +11,6 @@ build/
 .streamlit/secrets.toml
 data/synthetic/wells/
 data/synthetic/events.csv
+# Real NDIC extract is user-supplied; only the template + README are tracked.
+data/real/ndic/production.csv
 .DS_Store

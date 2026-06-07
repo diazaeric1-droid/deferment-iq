@@ -3,6 +3,15 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-06-06
+
+### Added
+- **Real-data option (North Dakota / NDIC)** — a "Data source" toggle (Synthetic default | Real —
+  NDIC) + adapter (`src/ndic.py`) ingesting tidy per-well **monthly** Bakken filings; downtime comes
+  from **days-produced**, and cause attribution shows **N/A on real data** (no public reason codes).
+  Drops in at `data/real/ndic/production.csv` (README + template; the CSV is gitignored).
+- **Data-provenance badge** under the header (green "REAL DATA — NDIC/Bakken" vs amber "SYNTHETIC").
+
 ## [0.3.0] — 2026-06-06
 
 ### Added
