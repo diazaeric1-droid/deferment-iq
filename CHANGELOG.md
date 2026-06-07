@@ -3,6 +3,12 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-06-07
+### Added
+- **Real public data is now the DEFAULT** — Colorado ECMC **DJ Basin** per-well monthly production (committed 28-well slice). The real loader is now CSV-path driven (Colorado default; NDIC as a bring-your-own-export path). Honest provenance: deferment **quantity** is real, cause attribution N/A (no public reason codes).
+### Changed
+- **Light theme** — suite-wide migration from dark/navy to a professional light palette (white surfaces, `plotly_white` charts, navy/blue accents retained); transparent fixed header so the title never clips. `runtime.txt` pinned to Python 3.11.
+
 ## [0.4.0] — 2026-06-06
 
 ### Added
