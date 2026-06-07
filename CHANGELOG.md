@@ -3,6 +3,15 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-06-06
+
+### Added
+- **Fleet explorer (multipage)** — the base-management review, recovery work-queue, and
+  classifier eval now live on a Fleet Overview alongside a **sortable fleet table** (lift,
+  lateral, basin·formation, deferred bbl/$, dominant cause, uptime %, recoverable $, capture %),
+  plus a **drill-down page per well** (`st.navigation`) with its potential-vs-actual chart,
+  events, KPIs, and recovery items.
+
 ## [0.2.0] — 2026-06-06
 
 ### Added
