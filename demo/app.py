@@ -47,17 +47,23 @@ from src.narrator import MissingAPIKey, render_review_markdown, write_review
 
 DATA = REPO_ROOT / "data" / "synthetic"
 WELLS = DATA / "wells"
+REAL_COLORADO = REPO_ROOT / "data" / "real" / "colorado" / "production.csv"
 REAL_NDIC = REPO_ROOT / "data" / "real" / "ndic" / "production.csv"
 EVAL = REPO_ROOT / "evals" / "results" / "summary.json"
 AFE_COPILOT_URL = "https://diazaeric1-afe-copilot.hf.space"
 
-# Data-source toggle values (sidebar radio).
+# Data-source toggle values (sidebar radio). Real Colorado (ECMC, free) is the default.
+SRC_REAL_CO = "Real — Colorado DJ Basin (ECMC)"
 SRC_SYNTHETIC = "Synthetic (demo)"
-SRC_REAL_NDIC = "Real — North Dakota (NDIC)"
+SRC_REAL_NDIC = "Real — North Dakota (NDIC, your export)"
 
 _BADGE_SYNTHETIC = ("synthetic",
                     "Modeled fleet with reason-coded events + known ground truth "
                     "(~92% classifier eval).")
+_BADGE_REAL_CO = ("real",
+                  "Colorado ECMC (COGCC) public monthly records — DJ Basin Niobrara/Codell "
+                  "horizontals (Weld County). Downtime from days-produced; cause attribution "
+                  "N/A (no public reason codes).")
 _BADGE_REAL = ("real",
                "North Dakota (NDIC) public monthly filings — Bakken. Downtime from "
                "days-produced; cause attribution N/A (no public reason codes).")
@@ -87,36 +93,43 @@ def _load(price_per_bbl, use_llm_flag, has_key, byok_key):
 
 
 @st.cache_data(show_spinner=False)
-def _load_real_ndic(price_per_bbl):
-    """Cache the REAL North-Dakota (NDIC) load + deferment compute.
+def _load_real(price_per_bbl, csv_path):
+    """Cache a REAL monthly extract load + deferment compute (keyed on the CSV path).
 
-    Monthly NDIC filings → the same fleet structure (rate from oil_bbl/days,
-    downtime from days-produced). There are NO public reason codes, so events is
-    empty and every lost barrel is 'uncoded' — the deferment QUANTITY is real, the
-    cause is N/A. Returns (fleet, empty_events, daily) to mirror ``_load``."""
+    Works for either real source — the FREE Colorado ECMC default or a user-supplied
+    NDIC export — because both share the tidy monthly schema and the same transform
+    (rate from oil_bbl/days, downtime from days-produced). There are NO public reason
+    codes, so events is empty and every lost barrel is 'uncoded' — the deferment
+    QUANTITY is real, the cause is N/A. Returns (fleet, empty_events, daily)."""
     from src.ndic import load_ndic_fleet
     from src.data_loader import EVENT_COLUMNS
-    fleet = load_ndic_fleet(REAL_NDIC)
+    fleet = load_ndic_fleet(csv_path)
     evc = pd.DataFrame(columns=[*EVENT_COLUMNS, "reason_key"])  # no real reason codes
     daily = compute_deferment(fleet, evc, price_per_bbl=price_per_bbl)
     return fleet, evc, daily
 
 
 def _resolve_source(data_source: str):
-    """Map the sidebar choice → (is_real, loader-callable, badge args).
+    """Map the sidebar choice → (is_real, real_csv_path_or_None, badge args).
 
-    Real is honored only when the local extract exists; otherwise we warn and fall
-    back to synthetic so the app always renders. The loader closes over the active
-    sidebar state already captured by ``_sidebar_controls``."""
-    if data_source == SRC_REAL_NDIC:
+    Default is real **Colorado (ECMC)** — free public monthly records, committed to the
+    repo. A selected real source is honored only when its extract exists; otherwise we
+    warn and fall back to synthetic so the app always renders."""
+    if data_source == SRC_REAL_CO:
+        if REAL_COLORADO.exists():
+            return True, str(REAL_COLORADO), _BADGE_REAL_CO
+        st.warning(
+            f"Colorado extract missing at `{REAL_COLORADO.relative_to(REPO_ROOT)}` — "
+            "falling back to the synthetic demo fleet.")
+    elif data_source == SRC_REAL_NDIC:
         if REAL_NDIC.exists():
-            return True, "real", _BADGE_REAL
+            return True, str(REAL_NDIC), _BADGE_REAL
         st.warning(
             "Real — North Dakota (NDIC) selected, but no extract found at "
-            f"`{REAL_NDIC.relative_to(REPO_ROOT)}`. Falling back to the synthetic "
-            "demo fleet. See `data/real/ndic/README.md` to add a public NDIC "
-            "monthly extract (no API key needed).")
-    return False, "synthetic", _BADGE_SYNTHETIC
+            f"`{REAL_NDIC.relative_to(REPO_ROOT)}`. NDIC bulk data is a **paid "
+            "subscription** (see `data/real/ndic/README.md`); the default **Colorado** "
+            "source is free real data. Falling back to synthetic.")
+    return False, None, _BADGE_SYNTHETIC
 
 
 @st.cache_data(show_spinner=False)
@@ -132,11 +145,15 @@ def _sidebar_controls() -> tuple[float, str, bool, str]:
     with st.sidebar:
         st.header("Settings")
         data_source = st.radio(
-            "Data source", [SRC_SYNTHETIC, SRC_REAL_NDIC], index=0, key="data_source",
-            help="Synthetic = modeled fleet with reason-coded events + ground truth "
-                 "(powers the classifier eval). Real = North Dakota (NDIC) public "
-                 "monthly Bakken filings (no API key); downtime is real (days-produced) "
-                 "but there are no public reason codes, so cause attribution is N/A.")
+            "Data source", [SRC_REAL_CO, SRC_SYNTHETIC, SRC_REAL_NDIC], index=0,
+            key="data_source",
+            help="Real — Colorado = FREE ECMC public monthly records (DJ Basin "
+                 "Niobrara/Codell horizontals); the default real source. Synthetic = "
+                 "modeled fleet with reason-coded events + ground truth (powers the "
+                 "classifier eval). Real — North Dakota = drop your own NDIC monthly "
+                 "export (NDIC bulk data is a paid subscription). Real monthly data has "
+                 "real downtime (days-produced) but no public reason codes, so cause "
+                 "attribution is N/A.")
         price = st.number_input("Realized oil price ($/bbl)", 20.0, 150.0, 70.0, 1.0,
                                 key="oil_price")
         byok_key = st.text_input(
@@ -206,9 +223,10 @@ def _build_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
 
 def render_overview() -> None:
     price, byok_key, use_llm, data_source = _sidebar_controls()
-    is_real, _src, badge = _resolve_source(data_source)
+    is_real, real_csv, badge = _resolve_source(data_source)
 
-    src_chip = ("North Dakota (NDIC) · real", "info") if is_real \
+    src_chip = (("Colorado DJ Basin · real" if data_source == SRC_REAL_CO
+                 else "North Dakota (NDIC) · real"), "info") if is_real \
         else ("~92% reason-code acc", "eval")
     theme.header(
         "Deferment IQ",
@@ -240,7 +258,7 @@ def render_overview() -> None:
         )
 
     if is_real:
-        fleet, evc, daily = _load_real_ndic(price)
+        fleet, evc, daily = _load_real(price, real_csv)
     else:
         fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)
     k = A.fleet_kpis(daily, price)
@@ -257,7 +275,7 @@ def render_overview() -> None:
     with tab_queue:
         _queue_section(queue, is_real)
     with tab_table:
-        _fleet_table_section(daily, price, is_real)
+        _fleet_table_section(daily, price, is_real, real_csv)
     with tab_eval:
         _eval_section(is_real)
 
@@ -271,7 +289,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
     if is_real:
         c[3].metric("Recoverable opportunity", "N/A", help="Needs reason codes — not in public data")
         c[4].metric("Reason-code capture", "N/A",
-                    help="NDIC public filings carry no reason codes — cause attribution is N/A. "
+                    help="Public monthly filings carry no reason codes — cause attribution is N/A. "
                          "The deferment QUANTITY (above) is real.")
     else:
         c[3].metric("Recoverable opportunity", f"${rec['recoverable_usd']:,.0f}")
@@ -298,7 +316,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
     with right:
         st.subheader("Where the barrels go — $ by cause")
         if is_real:
-            st.info("**Cause attribution N/A** — NDIC public monthly filings carry no reason "
+            st.info("**Cause attribution N/A** — public monthly filings carry no reason "
                     "codes or operator cause notes. The deferment **quantity** is real (from "
                     "days-produced); the per-cause $-Pareto needs an operator's coded event log.")
         elif len(pareto):
@@ -329,7 +347,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
         st.subheader("MTTR by cause (days)")
         m = A.mttr_by_cause(evc)
         if is_real:
-            st.info("MTTR needs a coded event log (start/end + cause) — N/A on NDIC public data.")
+            st.info("MTTR needs a coded event log (start/end + cause) — N/A on public monthly data.")
         elif len(m):
             mm = m.copy(); mm["mttr_days"] = mm["mttr_days"].map(lambda v: f"{v:.1f}")
             st.dataframe(mm[["label", "n_events", "mttr_days", "total_event_days"]]
@@ -352,7 +370,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
     st.subheader("📝 Senior-PE base-management review")
     if is_real:
         st.info("The narrated review summarizes deferment **by cause** and the **recoverable** "
-                "opportunity — both N/A on NDIC public data (no reason codes). The real numbers "
+                "opportunity — both N/A on public monthly data (no reason codes). The real numbers "
                 "are the production-efficiency and deferred-barrel/$ KPIs above. Switch to the "
                 "**Synthetic (demo)** data source for the full reason-coded VP review.")
     elif st.button("Generate review", type="primary"):
@@ -375,7 +393,7 @@ def _queue_section(queue, is_real=False) -> None:
         st.subheader("Prioritized recovery work-queue")
         st.info("**Cause attribution N/A — no public reason codes.** The recovery queue ranks "
                 "actionable items per (well, **recoverable cause**), which requires the operator's "
-                "coded downtime log. NDIC public filings give real deferment **quantity** (from "
+                "coded downtime log. Public monthly filings give real deferment **quantity** (from "
                 "days-produced) but no cause, so there's nothing to attribute or authorize here. "
                 "Switch to **Synthetic (demo)** for the full Quantify → Authorize work-queue.")
         return
@@ -445,18 +463,18 @@ def _queue_section(queue, is_real=False) -> None:
     st.caption("Deep-links open AFE Copilot in a new tab to draft the Authorization for Expenditure.")
 
 
-def _build_real_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
-    """One row per NDIC well from the REAL extract — real volumes/uptime, real
-    identity (operator/field/formation from the filing), cause N/A.
+def _build_real_fleet_table(daily: pd.DataFrame, csv_path: str) -> pd.DataFrame:
+    """One row per well from the active REAL extract — real volumes/uptime, real
+    identity (operator/field/formation from the public record), cause N/A.
 
-    Built directly off ``daily`` + the NDIC well meta (NOT the Permian registry,
-    which would stamp placeholder Midland/Delaware metadata onto Bakken wells)."""
+    Built directly off ``daily`` + the extract's own well meta (NOT the Permian
+    registry, which would stamp placeholder Midland/Delaware metadata onto these wells)."""
     if daily is None or not len(daily):
         return pd.DataFrame()
     meta = {}
     try:
         from src.ndic import ndic_well_meta
-        m = ndic_well_meta(REAL_NDIC)
+        m = ndic_well_meta(csv_path)
         meta = m.set_index("well_id").to_dict("index")
     except Exception:
         meta = {}
@@ -480,11 +498,11 @@ def _build_real_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("Deferred $", ascending=False).reset_index(drop=True)
 
 
-def _fleet_table_section(daily, price, is_real=False) -> None:
+def _fleet_table_section(daily, price, is_real=False, csv_path=None) -> None:
     st.caption("One row per well — sort any column. Open a well from the **Wells** section in "
                "the sidebar to drill in (potential-vs-actual, deferred bars, events, recovery items).")
     if is_real:
-        table = _build_real_fleet_table(daily, price)
+        table = _build_real_fleet_table(daily, csv_path)
         if table.empty:
             st.info("No fleet data available.")
             return
@@ -495,8 +513,8 @@ def _fleet_table_section(daily, price, is_real=False) -> None:
                 "Deferred bbl": st.column_config.NumberColumn(format="%d"),
                 "Uptime %": st.column_config.NumberColumn(format="%.1f%%"),
             })
-        st.caption("Real NDIC data: volumes + uptime are real; **Dominant cause is N/A** (no "
-                   "public reason codes), so there's no recoverable-$/capture-% column.")
+        st.caption("Real public monthly data: volumes + uptime are real; **Dominant cause is "
+                   "N/A** (no public reason codes), so there's no recoverable-$/capture-% column.")
         return
     table = _build_fleet_table(daily, price)
     if table.empty:
@@ -517,7 +535,7 @@ def _fleet_table_section(daily, price, is_real=False) -> None:
 def _eval_section(is_real=False) -> None:
     st.subheader("Reason-code classifier — eval vs. ground-truth causes")
     if is_real:
-        st.info("**Cause attribution N/A — no public reason codes.** NDIC public filings carry no "
+        st.info("**Cause attribution N/A — no public reason codes.** Public monthly filings carry no "
                 "operator cause notes, so there's no ground truth to score a classifier against on "
                 "real data. The eval below is measured on the **synthetic** reason-coded set (its "
                 "ground-truth labels) — the credential for the classifier; it does not run on the "
@@ -546,15 +564,18 @@ def _eval_section(is_real=False) -> None:
 # PAGE: per-well drill-down
 # =====================================================================
 
-def _render_well_real(well_id: str, price: float) -> None:
-    """Per-well drill-down on the REAL NDIC extract: real potential-vs-actual +
-    deferred bars from monthly filings, real identity (operator/field/formation),
-    cause attribution N/A (no public reason codes)."""
-    fleet, evc, daily = _load_real_ndic(price)
+def _render_well_real(well_id: str, price: float, csv_path: str,
+                      data_source: str, badge) -> None:
+    """Per-well drill-down on the active REAL extract (Colorado ECMC default, or a user's
+    NDIC export): real potential-vs-actual + deferred bars from monthly records, real
+    identity (operator/field/formation), cause attribution N/A (no public reason codes)."""
+    src_label = "Colorado ECMC" if data_source == SRC_REAL_CO else "North Dakota (NDIC)"
+    src_chip = "Colorado · real" if data_source == SRC_REAL_CO else "NDIC · real"
+    fleet, evc, daily = _load_real(price, csv_path)
     info = {}
     try:
         from src.ndic import ndic_well_meta
-        info = ndic_well_meta(REAL_NDIC).set_index("well_id").to_dict("index").get(well_id, {})
+        info = ndic_well_meta(csv_path).set_index("well_id").to_dict("index").get(well_id, {})
     except Exception:
         info = {}
 
@@ -562,18 +583,18 @@ def _render_well_real(well_id: str, price: float) -> None:
     sub = " · ".join(str(v) for v in (info.get("operator"), info.get("field"),
                                       info.get("formation")) if v)
     theme.header(f"{well_id} · {name}",
-                 subtitle=sub or "North Dakota (NDIC) public monthly filing",
-                 chips=[(f"v{__version__}", "ver"), ("NDIC · real", "info")])
-    theme.data_badge(*_BADGE_REAL)
+                 subtitle=sub or f"{src_label} public monthly record",
+                 chips=[(f"v{__version__}", "ver"), (src_chip, "info")])
+    theme.data_badge(*badge)
     _back_to_overview()
 
     wd = daily[daily["well_id"] == well_id] if len(daily) else daily.iloc[0:0]
     if not len(wd):
         st.info(
-            f"**{well_id}** isn't in the NDIC extract. The per-well menu in the sidebar is keyed to "
-            "the synthetic demo fleet (`well_0NN`); the real NDIC wells live in the **Fleet table** "
-            "on the overview. Open the **Fleet overview** to browse the real wells, or switch the "
-            "**Data source** back to *Synthetic (demo)* to drill into this well.")
+            f"**{well_id}** isn't in the {src_label} extract. The per-well menu in the sidebar is "
+            "keyed to the synthetic demo fleet (`well_0NN`); the real wells live in the **Fleet "
+            "table** on the overview. Open the **Fleet overview** to browse the real wells, or "
+            "switch the **Data source** back to *Synthetic (demo)* to drill into this well.")
         _back_to_overview()
         return
 
@@ -602,16 +623,16 @@ def _render_well_real(well_id: str, price: float) -> None:
 
     st.subheader("Recovery items for this well")
     st.info("**Cause attribution N/A — no public reason codes.** Recovery items require a coded "
-            "cause to attribute and authorize; NDIC public data has none. The deferment quantity "
+            "cause to attribute and authorize; public monthly data has none. The deferment quantity "
             "above is real.")
     _back_to_overview()
 
 
 def render_well(well_id: str) -> None:
     price, byok_key, use_llm, data_source = _sidebar_controls()
-    is_real, _src, _badge = _resolve_source(data_source)
+    is_real, real_csv, badge = _resolve_source(data_source)
     if is_real:
-        _render_well_real(well_id, price)
+        _render_well_real(well_id, price, real_csv, data_source, badge)
         return
 
     fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)

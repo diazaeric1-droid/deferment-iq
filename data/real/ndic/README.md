@@ -1,5 +1,7 @@
 # Real data — North Dakota (NDIC) monthly Bakken production
 
+> **Note:** The suite now defaults to **free Colorado ECMC** real data (`../colorado/`). NDIC per-well monthly production is a **paid subscription** ($100/yr Basic Services), so this remains a *bring-your-own-export* path — drop your own `production.csv` here to run on real North Dakota Bakken wells.
+
 Deferment IQ defaults to a **synthetic** reason-coded fleet (so the classifier eval
 has ground truth). It also runs on **real public data**: per-well **monthly**
 production from the **North Dakota Industrial Commission (NDIC) / Department of
