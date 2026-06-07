@@ -236,7 +236,22 @@ def render_overview() -> None:
     )
     theme.data_badge(*badge)
 
-    with st.expander(f"🆕 What is this / v{__version__}"):
+    theme.how_to(
+        "- **Deferment = potential − actual.** Each well's *potential* (entitlement) is "
+        "modeled from its full-uptime months (P75, decline-aware); the deferred volume is "
+        "what's left after subtracting the actual produced volume.\n"
+        "- **Two kinds of loss.** The gap is split into **downtime** (well off / curtailed — "
+        "from days-produced / runtime) vs. **underperformance** (well on but making less than "
+        "potential rate). An 8% deadband keeps healthy wells reading ~0.\n"
+        "- **Data source toggle (sidebar).** Defaults to **real Colorado ECMC** public monthly "
+        "records (DJ Basin); switch to **Synthetic (demo)** for the full reason-coded fleet, or "
+        "drop your own North Dakota (NDIC) export.\n"
+        "- **On REAL public data the QUANTITY is real, the cause is N/A.** Public monthly filings "
+        "carry no operator reason codes, so the deferred barrels/$ are real (from days-produced) "
+        "but per-cause attribution, the recovery queue, and MTTR are N/A — use **Synthetic (demo)** "
+        "to see those.")
+
+    with st.expander(f"🆕 What Is This / v{__version__}"):
         st.markdown(
             "- **Deferment vs. potential** — each well's entitlement is modeled from its full-uptime "
             "days (P75, decline-aware); the gap to actual is split into **downtime** vs. **underperformance**.\n"
@@ -268,7 +283,7 @@ def render_overview() -> None:
     queue = A.recovery_queue(daily, evc, price)
 
     tab_review, tab_queue, tab_table, tab_eval = st.tabs(
-        ["📋 Base-Management Review", "🔧 Recovery queue", "📋 Fleet table", "🎯 Classifier eval"])
+        ["📋 Base-Management Review", "🔧 Recovery Queue", "📋 Fleet Table", "🎯 Classifier Eval"])
 
     with tab_review:
         _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real)
@@ -299,7 +314,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
 
     left, right = st.columns(2)
     with left:
-        st.subheader("Deferment waterfall (bbl)")
+        st.subheader("Deferment Waterfall (bbl)")
         wf = A.waterfall(daily)
         fig = go.Figure(go.Waterfall(
             orientation="v",
@@ -310,11 +325,14 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
             increasing={"marker": {"color": theme.BLUE}},
             totals={"marker": {"color": theme.NAVY}}))
         st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
+        theme.source_note(
+            "Potential from full-uptime months (P75, decline-aware); deferred = potential − "
+            "actual, bridged potential → downtime → underperformance → actual, in bbl.")
         if is_real:
             st.caption("Real data: the bridge is gross potential → **uncoded** deferment → actual "
                        "(no per-cause split — public filings have no reason codes).")
     with right:
-        st.subheader("Where the barrels go — $ by cause")
+        st.subheader("Where the Barrels Go — $ by Cause")
         if is_real:
             st.info("**Cause attribution N/A** — public monthly filings carry no reason "
                     "codes or operator cause notes. The deferment **quantity** is real (from "
@@ -328,8 +346,11 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
             pf.update_layout(yaxis2=dict(overlaying="y", side="right", range=[0, 100], title="cum %"))
             st.plotly_chart(theme.style_fig(pf, height=380), width="stretch")
             st.caption("Blue = recoverable · grey = planned/reservoir (not recoverable).")
+            theme.source_note(
+                "Deferred $ = deferred bbl × realized oil price, ranked Pareto by cause "
+                "(vital-few first); cumulative % overlaid. Cause from the reason-code classifier.")
 
-    st.subheader("Worst-offender wells")
+    st.subheader("Worst-Offender Wells")
     disp = top.copy()
     disp["deferred_usd"] = disp["deferred_usd"].map(lambda v: f"${v:,.0f}")
     disp["deferred_bbl"] = disp["deferred_bbl"].map(lambda v: f"{v:,.0f}")
@@ -344,7 +365,7 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
 
     mc1, mc2 = st.columns(2)
     with mc1:
-        st.subheader("MTTR by cause (days)")
+        st.subheader("MTTR by Cause (days)")
         m = A.mttr_by_cause(evc)
         if is_real:
             st.info("MTTR needs a coded event log (start/end + cause) — N/A on public monthly data.")
@@ -360,14 +381,14 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
             mf.update_layout(xaxis_title="MTTR (days)")
             st.plotly_chart(theme.style_fig(mf, height=260, legend=False), width="stretch")
     with mc2:
-        st.subheader("Deferment trend (weekly bbl)")
+        st.subheader("Deferment Trend (Weekly bbl)")
         tr = A.deferment_trend(daily, "W")
         tf = go.Figure(go.Scatter(x=tr["date"], y=tr["deferred_bbl"], fill="tozeroy",
                                   line=dict(color=theme.RED)))
         st.plotly_chart(theme.style_fig(tf, height=260, legend=False), width="stretch")
 
     st.divider()
-    st.subheader("📝 Senior-PE base-management review")
+    st.subheader("📝 Senior-PE Base-Management Review")
     if is_real:
         st.info("The narrated review summarizes deferment **by cause** and the **recoverable** "
                 "opportunity — both N/A on public monthly data (no reason codes). The real numbers "
@@ -387,17 +408,20 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
                     "sidebar for the Senior-PE narrated version.")
             st.markdown(render_review_markdown(k, pareto, top, rec))
 
+    theme.references(["deferment", "pareto", "npv"])
+
 
 def _queue_section(queue, is_real=False) -> None:
     if is_real:
-        st.subheader("Prioritized recovery work-queue")
+        st.subheader("Prioritized Recovery Work-Queue")
         st.info("**Cause attribution N/A — no public reason codes.** The recovery queue ranks "
                 "actionable items per (well, **recoverable cause**), which requires the operator's "
                 "coded downtime log. Public monthly filings give real deferment **quantity** (from "
                 "days-produced) but no cause, so there's nothing to attribute or authorize here. "
                 "Switch to **Synthetic (demo)** for the full Quantify → Authorize work-queue.")
+        theme.references(["npv"])
         return
-    st.subheader("Prioritized recovery work-queue")
+    st.subheader("Prioritized Recovery Work-Queue")
     st.caption(
         "From *where are the barrels lost* to *what to do next, what it's worth, who acts* — "
         "the **Quantify → Authorize** handoff. One actionable item per (well, recoverable cause); "
@@ -407,6 +431,7 @@ def _queue_section(queue, is_real=False) -> None:
 
     if not len(queue):
         st.info("No recoverable deferment in the current period — nothing to queue.")
+        theme.references(["npv"])
         return
 
     total_rec_usd = float(queue["recoverable_usd"].sum())
@@ -436,8 +461,11 @@ def _queue_section(queue, is_real=False) -> None:
             name=c, orientation="h", marker_color=cmap[c],
             hovertemplate="%{y}<br>$%{x:,.0f}<extra></extra>")
     bf.update_layout(barmode="stack", xaxis_title="Recoverable $",
-                     title="Top recovery opportunities by $ (colored by cause)")
+                     title="Top Recovery Opportunities by $ (Colored by Cause)")
     st.plotly_chart(theme.style_fig(bf, height=420), width="stretch")
+    theme.source_note(
+        "Recoverable $ = recoverable bbl × realized oil price, per (well, recoverable cause); "
+        "planned + reservoir excluded. Ranked by priority = recoverable $ ÷ MTTR (days).")
 
     disp = queue.copy()
     disp.insert(0, "#", range(1, len(disp) + 1))
@@ -452,7 +480,7 @@ def _queue_section(queue, is_real=False) -> None:
     st.dataframe(disp, width="stretch", hide_index=True)
 
     st.divider()
-    st.subheader("Authorize the top interventions")
+    st.subheader("Authorize the Top Interventions")
     st.caption("Each item is sized and ready to hand to capital authorization.")
     for _, r in queue.head(5).iterrows():
         st.markdown(
@@ -461,6 +489,8 @@ def _queue_section(queue, is_real=False) -> None:
             f"~{r['mttr_days']:.1f}-day restore — "
             f"[authorize the intervention in AFE Copilot ↗]({AFE_COPILOT_URL})")
     st.caption("Deep-links open AFE Copilot in a new tab to draft the Authorization for Expenditure.")
+
+    theme.references(["npv"])
 
 
 def _build_real_fleet_table(daily: pd.DataFrame, csv_path: str) -> pd.DataFrame:
@@ -533,7 +563,7 @@ def _fleet_table_section(daily, price, is_real=False, csv_path=None) -> None:
 
 
 def _eval_section(is_real=False) -> None:
-    st.subheader("Reason-code classifier — eval vs. ground-truth causes")
+    st.subheader("Reason-Code Classifier — Eval vs. Ground-Truth Causes")
     if is_real:
         st.info("**Cause attribution N/A — no public reason codes.** Public monthly filings carry no "
                 "operator cause notes, so there's no ground truth to score a classifier against on "
@@ -558,6 +588,8 @@ def _eval_section(is_real=False) -> None:
                    "exactly where the optional LLM classifier earns its keep.")
     else:
         st.info("No eval summary yet — run `python -m evals.run_evals`.")
+
+    theme.references(["pareto"])
 
 
 # =====================================================================
@@ -609,7 +641,7 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
     m[2].metric("Uptime %", f"{uptime:.1f}%", help="Actual ÷ potential (downtime from days-produced)")
     m[3].metric("Dominant cause", "N/A", help="No public reason codes — cause attribution N/A")
 
-    st.subheader("Potential vs. actual — deferred barrels (monthly)")
+    st.subheader("Potential vs. Actual — Deferred Barrels (Monthly)")
     fig = go.Figure()
     fig.add_scatter(x=wd["date"], y=wd["potential"], name="Potential",
                     line=dict(color=theme.BLUE, dash="dash"))
@@ -618,13 +650,17 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
     fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred",
                 marker_color=theme.RED, opacity=0.5)
     st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
+    theme.source_note(
+        "Monthly: rate = oil_bbl ÷ days-produced; potential is decline-aware (P75 of full-uptime "
+        "months); deferred = potential − actual, in BOPD. Volumes/downtime real; cause N/A.")
     st.caption("Monthly cadence: rate = oil_bbl ÷ days-produced; downtime = days_in_month − "
                "days-produced. Volumes and downtime are real; **cause is N/A** (no public reason codes).")
 
-    st.subheader("Recovery items for this well")
+    st.subheader("Recovery Items for This Well")
     st.info("**Cause attribution N/A — no public reason codes.** Recovery items require a coded "
             "cause to attribute and authorize; public monthly data has none. The deferment quantity "
             "above is real.")
+    theme.references(["deferment", "npv"])
     _back_to_overview()
 
 
@@ -679,7 +715,7 @@ def render_well(well_id: str) -> None:
     m[4].metric("Lateral (ft)", f"{meta.lateral_length_ft:,}")
 
     # potential (dashed) vs actual BOPD + deferred bars overlay
-    st.subheader("Potential vs. actual — deferred barrels")
+    st.subheader("Potential vs. Actual — Deferred Barrels")
     fig = go.Figure()
     fig.add_scatter(x=wd["date"], y=wd["potential"], name="Potential",
                     line=dict(color=theme.BLUE, dash="dash"))
@@ -688,11 +724,14 @@ def render_well(well_id: str) -> None:
     fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred",
                 marker_color=theme.RED, opacity=0.5)
     st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
+    theme.source_note(
+        "Potential from full-uptime months (P75, decline-aware); deferred = potential − "
+        "actual, in BOPD; bars are daily deferred volume.")
 
     # events table for this well
     ev = evc[evc["well_id"] == well_id] if "well_id" in evc.columns else pd.DataFrame()
     if len(ev):
-        st.subheader("Events for this well")
+        st.subheader("Events for This Well")
         show = ev[["start_date", "end_date", "note", "reason_key"]].copy()
         from src.reason_codes import label_for
         show["reason_key"] = show["reason_key"].map(label_for)
@@ -702,7 +741,7 @@ def render_well(well_id: str) -> None:
         st.caption("No downtime/curtailment events logged for this well.")
 
     # this well's recovery items
-    st.subheader("Recovery items for this well")
+    st.subheader("Recovery Items for This Well")
     if len(well_queue):
         wq = well_queue.copy()
         wq["recoverable_usd"] = wq["recoverable_usd"].map(lambda v: f"${v:,.0f}")
@@ -715,6 +754,7 @@ def render_well(well_id: str) -> None:
     else:
         st.info("No recoverable deferment for this well — nothing to queue.")
 
+    theme.references(["deferment", "npv"])
     _back_to_overview()
 
 
@@ -726,7 +766,7 @@ theme.setup_page("Deferment IQ", icon="🛢️")
 theme.suite_nav("deferment")
 _bootstrap()
 
-overview = st.Page(render_overview, title="Fleet overview", icon="📊", default=True)
+overview = st.Page(render_overview, title="Fleet Overview", icon="📊", default=True)
 wells = [
     st.Page(partial(render_well, wid), title=wid, url_path=wid)
     for wid in _fleet_well_ids()
