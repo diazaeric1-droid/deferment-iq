@@ -22,3 +22,5 @@ jobs:
         run: pytest -q
       - name: Reason-code classifier eval gate (fails < 80%)
         run: python -m evals.run_evals
+      - name: Quantity-recovery eval gate (deferred-bbl error vs ground truth, both cadences)
+        run: python -m evals.quantity_recovery
