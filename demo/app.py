@@ -60,9 +60,9 @@ WELLS = DATA / "wells"
 REAL_COLORADO = REPO_ROOT / "data" / "real" / "colorado" / "production.csv"
 REAL_NDIC = REPO_ROOT / "data" / "real" / "ndic" / "production.csv"
 EVAL = REPO_ROOT / "evals" / "results" / "summary.json"
-AFE_COPILOT_URL = "https://diazaeric1-afe-copilot.hf.space"
+AFE_COPILOT_URL = "https://afe-copilot.streamlit.app"
 
-# Data-source toggle values (sidebar radio). Real Colorado (ECMC, free) is the default.
+# Data-source toggle values (sidebar radio). Synthetic (demo) is the default.
 SRC_REAL_CO = "Real — Colorado DJ Basin (ECMC)"
 SRC_SYNTHETIC = "Synthetic (demo)"
 SRC_REAL_NDIC = "Real — North Dakota (NDIC, your export)"
@@ -155,15 +155,14 @@ def _sidebar_controls() -> tuple[float, str, bool, str]:
     with st.sidebar:
         st.header("Settings")
         data_source = st.radio(
-            "Data source", [SRC_REAL_CO, SRC_SYNTHETIC, SRC_REAL_NDIC], index=0,
+            "Data source", [SRC_SYNTHETIC, SRC_REAL_CO, SRC_REAL_NDIC], index=0,
             key="data_source",
-            help="Real — Colorado = FREE ECMC public monthly records (DJ Basin "
-                 "Niobrara/Codell horizontals); the default real source. Synthetic = "
-                 "modeled fleet with reason-coded events + ground truth (powers the "
-                 "classifier eval). Real — North Dakota = drop your own NDIC monthly "
-                 "export (NDIC bulk data is a paid subscription). Real monthly data has "
-                 "real downtime (days-produced) but no public reason codes, so cause "
-                 "attribution is N/A.")
+            help="Synthetic = modeled fleet with reason-coded events + ground truth "
+                 "(powers the classifier eval); the default. Real — Colorado = FREE ECMC "
+                 "public monthly records (DJ Basin Niobrara/Codell horizontals). Real — "
+                 "North Dakota = drop your own NDIC monthly export (NDIC bulk data is a "
+                 "paid subscription). Real monthly data has real downtime (days-produced) "
+                 "but no public reason codes, so cause attribution is N/A.")
         price = st.number_input("Realized oil price ($/bbl)", 20.0, 150.0, 70.0, 1.0,
                                 key="oil_price")
         byok_key = st.text_input(
