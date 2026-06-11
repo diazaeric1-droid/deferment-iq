@@ -3,6 +3,14 @@
 All notable changes are documented here. Format: [Keep a Changelog](https://keepachangelog.com/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] — 2026-06-11
+
+### Fixed
+- **Cadence-aware deferment engine (correctness)** — the engine now works in **calendar-day volume** terms instead of fixed row-count windows. Each record carries an explicit calendar span (`span_days`) and producing-time (`producing_days`); potential is a decline-aware P75 over a **time-based** (calendar-day) window, and deferment = `potential_calendar_volume − actual`, split into **downtime** (`days_in_month − days-produced`) vs. **underperformance** (rate shortfall while up), with the 8% deadband preserved. The previous row-count logic treated a monthly record like a daily one, badly mis-counting potential and deferment on real **monthly** Colorado ECMC / NDIC data (e.g. a month with 21 lost producing days read **0** deferred barrels; fleet KPIs showed `pct_deferred` > 100% with deferred > potential). Now monthly `actual_bbl` equals the raw `oil_bbl` exactly and the waterfall/Pareto/KPIs are coherent. Daily synthetic results are unchanged. Reason-code classifier, waterfall, Pareto, MTTR, and public signatures preserved (`compute_deferment` adds `*_vol` / `span_days` columns).
+
+### Added
+- **Quantity-recovery eval (Phase 2)** — a ground-truth fleet with **known injected** downtime + underperformance per well validates the engine's barrel accounting: error on total deferred bbl, on the downtime/underperformance split, and on recovery opportunity vs. the true recoverable. Runs on **both daily and monthly** cadence of the identical fleet to prove cadence-awareness (daily ~exact; monthly downtime exact and matching daily to the bit; monthly under-counts the smeared sub-month underperformance — documented). **CI-gated** (`evals/quantity_recovery.py`, `tests/test_quantity_recovery.py`) — the build fails if the deferred-bbl error exceeds a sane, cadence-appropriate bound.
+
 ## [0.5.0] — 2026-06-07
 ### Added
 - **Real public data is now the DEFAULT** — Colorado ECMC **DJ Basin** per-well monthly production (committed 28-well slice). The real loader is now CSV-path driven (Colorado default; NDIC as a bring-your-own-export path). Honest provenance: deferment **quantity** is real, cause attribution N/A (no public reason codes).

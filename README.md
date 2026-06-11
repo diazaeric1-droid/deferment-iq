@@ -52,13 +52,28 @@ narrates. **Everything works with no API key.**
 
 ## How it's evaluated
 
-The synthetic event log carries a ground-truth cause the classifier never sees. The rules
-classifier is scored against it — **accuracy + per-class precision/recall/F1 + confusion** — and a
-**CI gate fails the build under 80%** (current ~92%). Residual misses are the deliberately vague
-notes ("well down, see foreman") — exactly where the optional LLM classifier earns its keep. Run:
+Two committed, CI-gated evals:
+
+**1. Reason-code classifier.** The synthetic event log carries a ground-truth cause the
+classifier never sees. The rules classifier is scored against it — **accuracy + per-class
+precision/recall/F1 + confusion** — and a **CI gate fails the build under 80%** (current ~92%).
+Residual misses are the deliberately vague notes ("well down, see foreman") — exactly where the
+optional LLM classifier earns its keep.
+
+**2. Quantity-recovery (engine accounting).** A separate eval builds a synthetic fleet with
+**known injected downtime + underperformance per well**, so the true deferred / recoverable
+barrels are known, then checks the engine's *quantity* math against them — error on total
+deferred bbl, on the downtime-vs-underperformance split, and on recovery opportunity. It runs on
+**both a daily-cadence and a monthly-cadence** representation of the identical fleet to prove the
+engine is **cadence-aware**: daily recovers ground truth ~exactly, and monthly resolves downtime
+**exactly** (days-produced is explicit) with downtime barrels matching daily to the bit. Short
+sub-month rate dips are smeared by the monthly producing-day average, so monthly under-counts
+underperformance — an inherent limit of public monthly data, reported openly and gated per
+cadence. A **CI gate fails the build** if the deferred-bbl error exceeds a sane bound.
 
 ```bash
-python -m evals.run_evals
+python -m evals.run_evals            # classifier eval
+python -m evals.quantity_recovery    # engine quantity / cadence-awareness eval
 ```
 
 ## Quick start
@@ -67,6 +82,7 @@ python -m evals.run_evals
 pip install -e ".[demo,dev]"
 python data/synthetic/generate.py     # 40 wells x 90 days + an event log of operator notes
 python -m evals.run_evals             # classifier eval
+python -m evals.quantity_recovery     # engine quantity / cadence-awareness eval
 streamlit run demo/app.py
 ```
 
