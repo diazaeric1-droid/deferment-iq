@@ -403,6 +403,8 @@ def _review_section(k, pareto, top, rec, daily, evc, price, byok_key, is_real=Fa
         disp["top_cause"] = "N/A (uncoded)"
     disp.columns = ["Well", "Deferred bbl", "Deferred $", "Dominant cause", "Uptime"]
     st.dataframe(disp, width="stretch", hide_index=True)
+    st.download_button("⬇ Download deferment summary (CSV)", data=top.to_csv(index=False),
+                       file_name="deferment_fleet.csv", mime="text/csv")
     if is_real:
         st.caption("Ranked by **real** deferred barrels/$ (potential vs. actual). Dominant "
                    "cause is N/A — no public reason codes.")
