@@ -66,6 +66,7 @@ AFE_COPILOT_URL = "https://afe-copilot.streamlit.app"
 SRC_REAL_CO = "Real — Colorado DJ Basin (ECMC)"
 SRC_SYNTHETIC = "Synthetic (demo)"
 SRC_REAL_NDIC = "Real — North Dakota (NDIC, your export)"
+SRC_UPLOAD = "Upload my data (CSV)"
 
 _BADGE_SYNTHETIC = ("synthetic",
                     "Modeled fleet with reason-coded events + known ground truth "
@@ -77,6 +78,7 @@ _BADGE_REAL_CO = ("real",
 _BADGE_REAL = ("real",
                "North Dakota (NDIC) public monthly filings — Bakken. Downtime from "
                "days-produced; cause attribution N/A (no public reason codes).")
+_BADGE_UPLOAD = ("real", "User-uploaded monthly production data.")
 
 
 # ---- bootstrap + cached loads ----------------------------------------------
@@ -119,12 +121,16 @@ def _load_real(price_per_bbl, csv_path):
     return fleet, evc, daily
 
 
-def _resolve_source(data_source: str):
+def _resolve_source(data_source: str, uploaded=None):
     """Map the sidebar choice → (is_real, real_csv_path_or_None, badge args).
 
     Default is real **Colorado (ECMC)** — free public monthly records, committed to the
     repo. A selected real source is honored only when its extract exists; otherwise we
-    warn and fall back to synthetic so the app always renders."""
+    warn and fall back to synthetic so the app always renders.
+
+    For SRC_UPLOAD, returns the sentinel string "UPLOAD" as the csv path — callers must
+    check for this and handle the uploaded file object from session state / the return
+    value of _sidebar_controls() themselves."""
     if data_source == SRC_REAL_CO:
         if REAL_COLORADO.exists():
             return True, str(REAL_COLORADO), _BADGE_REAL_CO
@@ -139,6 +145,8 @@ def _resolve_source(data_source: str):
             f"`{REAL_NDIC.relative_to(REPO_ROOT)}`. NDIC bulk data is a **paid "
             "subscription** (see `data/real/ndic/README.md`); the default **Colorado** "
             "source is free real data. Falling back to synthetic.")
+    elif data_source == SRC_UPLOAD:
+        return True, "UPLOAD", _BADGE_UPLOAD
     return False, None, _BADGE_SYNTHETIC
 
 
@@ -150,19 +158,27 @@ def _fleet_well_ids() -> list[str]:
 
 # ---- shared helpers --------------------------------------------------------
 
-def _sidebar_controls() -> tuple[float, str, bool, str]:
-    """Render the shared sidebar settings and return (price, byok_key, use_llm, data_source)."""
+def _sidebar_controls() -> tuple[float, str, bool, str, object]:
+    """Render the shared sidebar settings and return (price, byok_key, use_llm, data_source, uploaded)."""
     with st.sidebar:
         st.header("Settings")
         data_source = st.radio(
-            "Data source", [SRC_SYNTHETIC, SRC_REAL_CO, SRC_REAL_NDIC], index=0,
+            "Data source", [SRC_SYNTHETIC, SRC_REAL_CO, SRC_REAL_NDIC, SRC_UPLOAD], index=0,
             key="data_source",
             help="Synthetic = modeled fleet with reason-coded events + ground truth "
                  "(powers the classifier eval); the default. Real — Colorado = FREE ECMC "
                  "public monthly records (DJ Basin Niobrara/Codell horizontals). Real — "
                  "North Dakota = drop your own NDIC monthly export (NDIC bulk data is a "
-                 "paid subscription). Real monthly data has real downtime (days-produced) "
+                 "paid subscription). Upload my data = drop any monthly production CSV in "
+                 "the tidy schema. Real monthly data has real downtime (days-produced) "
                  "but no public reason codes, so cause attribution is N/A.")
+        if data_source == SRC_UPLOAD:
+            uploaded = st.file_uploader(
+                "Monthly production CSV", type=["csv"],
+                help="Columns: well_id, date (YYYY-MM), oil_bbl, gas_mcf, water_bbl, "
+                     "days_on (or days_produced)")
+        else:
+            uploaded = None
         price = st.number_input("Realized oil price ($/bbl)", 20.0, 150.0, 70.0, 1.0,
                                 key="oil_price")
         byok_key = st.text_input(
@@ -173,7 +189,7 @@ def _sidebar_controls() -> tuple[float, str, bool, str]:
                               key="use_llm",
                               help="Re-classify event notes with Claude (needs key). Default is the "
                                    "deterministic rules classifier. Synthetic data only.")
-    return price, byok_key, use_llm, data_source
+    return price, byok_key, use_llm, data_source, uploaded
 
 
 def _back_to_overview():
@@ -231,11 +247,12 @@ def _build_fleet_table(daily: pd.DataFrame, price: float) -> pd.DataFrame:
 # =====================================================================
 
 def render_overview() -> None:
-    price, byok_key, use_llm, data_source = _sidebar_controls()
-    is_real, real_csv, badge = _resolve_source(data_source)
+    price, byok_key, use_llm, data_source, uploaded = _sidebar_controls()
+    is_real, real_csv, badge = _resolve_source(data_source, uploaded)
 
     src_chip = (("Colorado DJ Basin · real" if data_source == SRC_REAL_CO
-                 else "North Dakota (NDIC) · real"), "info") if is_real \
+                 else ("User-uploaded data · real" if data_source == SRC_UPLOAD
+                       else "North Dakota (NDIC) · real")), "info") if is_real \
         else ("~92% reason-code acc", "eval")
     theme.header(
         "Deferment IQ",
@@ -281,7 +298,25 @@ def render_overview() -> None:
             "unified suite theme + cross-app navigator."
         )
 
-    if is_real:
+    if is_real and real_csv == "UPLOAD":
+        if uploaded is None:
+            st.info("Upload a CSV to analyze your own fleet.")
+            st.stop()
+        import tempfile, os
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                tmp.write(uploaded.getvalue())
+                tmp_path = tmp.name
+            fleet, evc, daily = _load_real(price, tmp_path)
+        except Exception as e:
+            st.exception(e)
+            st.stop()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+    elif is_real:
         fleet, evc, daily = _load_real(price, real_csv)
     else:
         fleet, evc, daily = _load(price, use_llm, bool(byok_key), byok_key)
@@ -487,6 +522,12 @@ def _queue_section(queue, is_real=False) -> None:
     disp.columns = ["#", "Well", "Cause", "Suggested action",
                     "Recoverable bbl", "Recoverable $", "MTTR (d)", "Priority ($/day)"]
     st.dataframe(disp, width="stretch", hide_index=True)
+    st.download_button(
+        "⬇ Download CSV",
+        data=queue.to_csv(index=False),
+        file_name="recovery_work_queue.csv",
+        mime="text/csv",
+    )
 
     st.divider()
     st.subheader("Authorize the Top Interventions")
@@ -554,6 +595,12 @@ def _fleet_table_section(daily, price, is_real=False, csv_path=None) -> None:
             })
         st.caption("Real public monthly data: volumes + uptime are real; **Dominant cause is "
                    "N/A** (no public reason codes), so there's no recoverable-$/capture-% column.")
+        st.download_button(
+            "⬇ Download CSV",
+            data=table.to_csv(index=False),
+            file_name="deferment_fleet_table.csv",
+            mime="text/csv",
+        )
         return
     table = _build_fleet_table(daily, price)
     if table.empty:
@@ -569,6 +616,12 @@ def _fleet_table_section(daily, price, is_real=False, csv_path=None) -> None:
             "Uptime %": st.column_config.NumberColumn(format="%.1f%%"),
             "Capture %": st.column_config.NumberColumn(format="%d%%"),
         })
+    st.download_button(
+        "⬇ Download CSV",
+        data=table.to_csv(index=False),
+        file_name="deferment_fleet_table.csv",
+        mime="text/csv",
+    )
 
 
 def _eval_section(is_real=False) -> None:
@@ -610,8 +663,15 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
     """Per-well drill-down on the active REAL extract (Colorado ECMC default, or a user's
     NDIC export): real potential-vs-actual + deferred bars from monthly records, real
     identity (operator/field/formation), cause attribution N/A (no public reason codes)."""
-    src_label = "Colorado ECMC" if data_source == SRC_REAL_CO else "North Dakota (NDIC)"
-    src_chip = "Colorado · real" if data_source == SRC_REAL_CO else "NDIC · real"
+    if data_source == SRC_REAL_CO:
+        src_label = "Colorado ECMC"
+        src_chip = "Colorado · real"
+    elif data_source == SRC_UPLOAD:
+        src_label = "User-uploaded data"
+        src_chip = "User-uploaded · real"
+    else:
+        src_label = "North Dakota (NDIC)"
+        src_chip = "NDIC · real"
     fleet, evc, daily = _load_real(price, csv_path)
     info = {}
     try:
@@ -674,8 +734,26 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
 
 
 def render_well(well_id: str) -> None:
-    price, byok_key, use_llm, data_source = _sidebar_controls()
-    is_real, real_csv, badge = _resolve_source(data_source)
+    price, byok_key, use_llm, data_source, uploaded = _sidebar_controls()
+    is_real, real_csv, badge = _resolve_source(data_source, uploaded)
+    if is_real and real_csv == "UPLOAD":
+        if uploaded is None:
+            st.info("Upload a CSV to analyze your own fleet.")
+            st.stop()
+        import tempfile, os
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+                tmp.write(uploaded.getvalue())
+                tmp_path = tmp.name
+            _render_well_real(well_id, price, tmp_path, data_source, badge)
+        except Exception as e:
+            st.exception(e)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        return
     if is_real:
         _render_well_real(well_id, price, real_csv, data_source, badge)
         return
