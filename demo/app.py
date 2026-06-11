@@ -560,9 +560,14 @@ def _build_real_fleet_table(daily: pd.DataFrame, csv_path: str) -> pd.DataFrame:
         meta = m.set_index("well_id").to_dict("index")
     except Exception:
         meta = {}
-    g = daily.groupby("well_id").agg(
+    d = daily.copy()
+    # Calendar-day VOLUME columns (cadence-aware); fall back to per-record rate for
+    # daily data / older frames where a span is one day (volume == rate).
+    d["_pot_vol"] = d["potential_vol"] if "potential_vol" in d.columns else d["potential"]
+    d["_act_vol"] = d["actual_vol"] if "actual_vol" in d.columns else d["bopd"]
+    g = d.groupby("well_id").agg(
         deferred_bbl=("total_def", "sum"), deferred_usd=("deferred_usd", "sum"),
-        potential=("potential", "sum"), actual=("bopd", "sum")).reset_index()
+        potential=("_pot_vol", "sum"), actual=("_act_vol", "sum")).reset_index()
     g["uptime_pct"] = (g["actual"] / g["potential"] * 100.0).where(g["potential"] > 0, 100.0)
     rows = []
     for _, r in g.iterrows():
@@ -702,8 +707,9 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
         return
 
     deferred_bbl = float(wd["total_def"].sum())
-    potential = float(wd["potential"].sum())
-    actual = float(wd["bopd"].sum())
+    # Calendar-day volumes (cadence-aware) for the uptime ratio; fall back to rate sums.
+    potential = float((wd["potential_vol"] if "potential_vol" in wd else wd["potential"]).sum())
+    actual = float((wd["actual_vol"] if "actual_vol" in wd else wd["bopd"]).sum())
     uptime = (actual / potential * 100.0) if potential > 0 else 100.0
 
     m = st.columns(4)
@@ -718,12 +724,17 @@ def _render_well_real(well_id: str, price: float, csv_path: str,
                     line=dict(color=theme.BLUE, dash="dash"))
     fig.add_scatter(x=wd["date"], y=wd["bopd"], name="Actual BOPD",
                     line=dict(color=theme.NAVY))
-    fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred",
+    # Bars share the BOPD axis: deferred VOLUME averaged over each month's calendar days.
+    _def_rate = (wd["total_def"] / wd["span_days"]) if "span_days" in wd else wd["total_def"]
+    fig.add_bar(x=wd["date"], y=_def_rate, name="Deferred (avg BOPD)",
                 marker_color=theme.RED, opacity=0.5)
     st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
     theme.source_note(
         "Monthly: rate = oil_bbl ÷ days-produced; potential is decline-aware (P75 of full-uptime "
-        "months); deferred = potential − actual, in BOPD. Volumes/downtime real; cause N/A.")
+        "months); deferred = potential_calendar_volume − actual, split into downtime "
+        "(days_in_month − days-produced) vs. underperformance. Bars show deferred volume as an "
+        "avg BOPD over the month; the Deferred-bbl metric above is the true monthly volume. "
+        "Volumes/downtime real; cause N/A.")
     st.caption("Monthly cadence: rate = oil_bbl ÷ days-produced; downtime = days_in_month − "
                "days-produced. Volumes and downtime are real; **cause is N/A** (no public reason codes).")
 
@@ -780,8 +791,9 @@ def render_well(well_id: str) -> None:
 
     deferred_bbl = float(wd["total_def"].sum())
     deferred_usd = deferred_bbl * price
-    potential = float(wd["potential"].sum())
-    actual = float(wd["bopd"].sum())
+    # Calendar-day volumes (cadence-aware) for the uptime ratio; fall back to rate sums.
+    potential = float((wd["potential_vol"] if "potential_vol" in wd else wd["potential"]).sum())
+    actual = float((wd["actual_vol"] if "actual_vol" in wd else wd["bopd"]).sum())
     uptime = (actual / potential * 100.0) if potential > 0 else 100.0
 
     # dominant cause + recovery items for this well (reuse the same analytics).
@@ -810,12 +822,15 @@ def render_well(well_id: str) -> None:
                     line=dict(color=theme.BLUE, dash="dash"))
     fig.add_scatter(x=wd["date"], y=wd["bopd"], name="Actual BOPD",
                     line=dict(color=theme.NAVY))
-    fig.add_bar(x=wd["date"], y=wd["total_def"], name="Deferred",
+    # Bars share the BOPD axis: deferred volume averaged over each record's calendar span
+    # (daily data → one day, so this equals the day's deferred bbl).
+    _def_rate = (wd["total_def"] / wd["span_days"]) if "span_days" in wd else wd["total_def"]
+    fig.add_bar(x=wd["date"], y=_def_rate, name="Deferred (avg BOPD)",
                 marker_color=theme.RED, opacity=0.5)
     st.plotly_chart(theme.style_fig(fig, height=380), width="stretch")
     theme.source_note(
-        "Potential from full-uptime months (P75, decline-aware); deferred = potential − "
-        "actual, in BOPD; bars are daily deferred volume.")
+        "Potential from full-uptime days (P75, decline-aware); deferred = potential − "
+        "actual, split into downtime vs. underperformance; bars are deferred volume as avg BOPD.")
 
     # events table for this well
     ev = evc[evc["well_id"] == well_id] if "well_id" in evc.columns else pd.DataFrame()

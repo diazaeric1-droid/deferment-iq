@@ -10,18 +10,34 @@ import pandas as pd
 from .reason_codes import label_for, suggested_action
 
 
+def _vol(daily: pd.DataFrame, rate_col: str, vol_col: str) -> pd.Series:
+    """Volume (bbl) column, with a back-compat fallback to a rate column.
+
+    The cadence-aware engine emits explicit calendar-day volume columns
+    (``potential_vol`` / ``actual_vol``). Older callers / hand-built frames may only
+    carry the per-record rate (``potential`` / ``bopd``); for daily data a span is one
+    day so the rate equals the volume, which keeps those frames working.
+    """
+    return daily[vol_col] if vol_col in daily.columns else daily[rate_col]
+
+
 def fleet_kpis(daily: pd.DataFrame, price_per_bbl: float = 70.0) -> dict:
     if daily.empty:
         return {}
-    pot = float(daily["potential"].sum())
-    act = float(daily["bopd"].sum())
+    pot = float(_vol(daily, "potential", "potential_vol").sum())
+    act = float(_vol(daily, "bopd", "actual_vol").sum())
     deferred = float(daily["total_def"].sum())
     loss = daily[daily["total_def"] > 1e-6]
     captured = float(loss[loss["reason_key"] != "unclassified"]["total_def"].sum())
     n_days = daily["date"].nunique()
+    # Calendar days the period actually spans (cadence-aware): for monthly data this is
+    # ~30× the row count, so deferred-per-day is barrels/day, not barrels/month.
+    period_days = (float(daily.groupby("well_id")["span_days"].sum().max())
+                   if "span_days" in daily.columns else float(n_days))
+    period_days = max(period_days, 1.0)
     return {
         "n_wells": int(daily["well_id"].nunique()),
-        "period_days": int(n_days),
+        "period_days": int(round(period_days)),
         "potential_bbl": pot,
         "actual_bbl": act,
         "deferred_bbl": deferred,
@@ -29,7 +45,7 @@ def fleet_kpis(daily: pd.DataFrame, price_per_bbl: float = 70.0) -> dict:
         "uptime_pct": (act / pot * 100.0) if pot > 0 else 100.0,   # production efficiency
         "pct_deferred": (deferred / pot * 100.0) if pot > 0 else 0.0,
         "capture_rate_pct": (captured / deferred * 100.0) if deferred > 0 else 100.0,
-        "deferred_bopd_avg": deferred / n_days if n_days else 0.0,
+        "deferred_bopd_avg": deferred / period_days,
     }
 
 
@@ -56,9 +72,12 @@ def top_wells(daily: pd.DataFrame, n: int = 10) -> pd.DataFrame:
     loss = daily[daily["total_def"] > 1e-6]
     if loss.empty:
         return pd.DataFrame(columns=["well_id", "deferred_bbl", "deferred_usd", "top_cause", "uptime_pct"])
-    by_well = daily.groupby("well_id").agg(
+    d = daily.copy()
+    d["_pot_vol"] = _vol(d, "potential", "potential_vol")
+    d["_act_vol"] = _vol(d, "bopd", "actual_vol")
+    by_well = d.groupby("well_id").agg(
         deferred_bbl=("total_def", "sum"), deferred_usd=("deferred_usd", "sum"),
-        potential=("potential", "sum"), actual=("bopd", "sum")).reset_index()
+        potential=("_pot_vol", "sum"), actual=("_act_vol", "sum")).reset_index()
     # dominant cause per well
     cause = (loss.groupby(["well_id", "reason_key"])["deferred_usd"].sum()
              .reset_index().sort_values("deferred_usd", ascending=False)
@@ -75,8 +94,8 @@ def waterfall(daily: pd.DataFrame) -> list[dict]:
     """Volume bridge: gross potential → minus each cause (planned first) → actual."""
     if daily.empty:
         return []
-    pot = float(daily["potential"].sum())
-    act = float(daily["bopd"].sum())
+    pot = float(_vol(daily, "potential", "potential_vol").sum())
+    act = float(_vol(daily, "bopd", "actual_vol").sum())
     steps = [{"label": "Gross potential", "value": pot, "kind": "total"}]
     par = pareto_by_cause(daily)
     # show planned losses first (expected), then unplanned biggest-first
@@ -172,6 +191,8 @@ def recovery_queue(daily: pd.DataFrame, events: pd.DataFrame | None = None,
 def deferment_trend(daily: pd.DataFrame, freq: str = "W") -> pd.DataFrame:
     if daily.empty:
         return pd.DataFrame(columns=["date", "deferred_bbl", "potential_bbl"])
-    t = (daily.set_index("date").groupby(pd.Grouper(freq=freq))
-         .agg(deferred_bbl=("total_def", "sum"), potential_bbl=("potential", "sum")).reset_index())
+    d = daily.copy()
+    d["_pot_vol"] = _vol(d, "potential", "potential_vol")
+    t = (d.set_index("date").groupby(pd.Grouper(freq=freq))
+         .agg(deferred_bbl=("total_def", "sum"), potential_bbl=("_pot_vol", "sum")).reset_index())
     return t

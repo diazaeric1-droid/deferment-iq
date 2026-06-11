@@ -1,20 +1,48 @@
-"""Deferment engine: per-day lost-oil decomposition + reason-code attribution.
+"""Deferment engine: per-record lost-oil decomposition + reason-code attribution.
 
-For each well-day we split the gap between potential and actual into:
-  - downtime deferment : potential * (1 - runtime_fraction)   (well was OFF part of the day)
-  - rate deferment     : the rest                              (UNDERPERFORMED while up — choked,
-                                                                high line pressure, watering out)
-These sum exactly to max(0, potential - actual). Each day's loss is attributed to the
-cause of the downtime/curtailment EVENT covering that day (classified from its note);
-days with a loss but no event become 'unclassified' — uncaptured deferment, itself a
-finding the asset team should chase.
+CADENCE-AWARE, TIME-BASED accounting
+------------------------------------
+The engine works in **calendar-day volume** terms (barrels over each record's real
+calendar span), NOT in fixed row-count windows. This is the core correctness fix: a
+1-row *monthly* record and a 1-row *daily* record cover very different amounts of
+calendar time, so treating "one row == one day" mis-counts potential and deferment on
+monthly data (real Colorado ECMC / NDIC filings are monthly). Every record carries an
+explicit calendar span (``span_days``) and producing-time (``producing_days``);
+downtime lives in the gap between them.
+
+For each record we split the gap between potential and actual into two **volume** (bbl)
+buckets over that record's calendar span:
+
+  - downtime deferment      : pot_rate × (calendar_days − producing_days)
+                              (well was OFF for part of the span — days-produced gap)
+  - underperformance ("rate"): (pot_rate − up_rate) × producing_days
+                              (UNDERPERFORMED while up — choked, high line pressure,
+                               watering out)
+
+where ``pot_rate`` is the capability (producing-day) rate from ``potential.py`` and
+``up_rate`` is the record's own producing-day rate. The two buckets sum exactly to
+``max(0, potential_volume − actual_volume)``. An ~8%-of-potential deadband zeroes
+within-noise gaps so a healthy well reads ~0 deferred.
+
+Each record's loss is attributed to the cause of the downtime/curtailment EVENT
+covering it (classified from its note); records with a loss but no event become
+'unclassified' — uncaptured deferment, itself a finding the asset team should chase.
+
+OUTPUT CONTRACT
+---------------
+``total_def``, ``downtime_def``, ``rate_def`` and ``deferred_usd`` are **volumes**
+(bbl / $) over each record's span — so summing them across records gives correct fleet
+barrels/$ for any cadence (for daily data a span is 1 day, so a volume equals its
+rate numerically and behavior is unchanged). ``bopd`` and ``potential`` remain
+per-record **rates** (BOPD) for charting; ``actual_vol`` / ``potential_vol`` /
+``span_days`` / ``producing_days`` are provided for transparency.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-from .potential import well_potential
+from .potential import producing_day_rate_filled, record_spans, well_potential
 from .reason_codes import classify, is_planned, is_recoverable, label_for
 
 # Losses smaller than this fraction of potential are measurement/normal-variation noise,
@@ -23,25 +51,48 @@ DEADBAND_FRAC = 0.08
 
 
 def _well_deferment(well_id: str, prod: pd.DataFrame) -> pd.DataFrame:
-    pot = well_potential(prod).to_numpy(dtype=float)
-    r = (prod["runtime_pct"].clip(lower=0, upper=100) / 100.0).to_numpy(dtype=float)
-    bopd = prod["bopd"].to_numpy(dtype=float)
+    """Per-record deferment for one well, in calendar-day **volume** (bbl) terms."""
+    cal, prod_days = record_spans(prod)
+    cal = cal.to_numpy(dtype=float)
+    prod_days = prod_days.to_numpy(dtype=float)
 
-    gap = np.maximum(pot - bopd, 0.0)
-    counts = gap > (DEADBAND_FRAC * pot)            # deadband: ignore within-noise gaps
+    pot_rate = well_potential(prod).to_numpy(dtype=float)          # producing-day capability, BOPD
+    up_rate = producing_day_rate_filled(prod).to_numpy(dtype=float)  # this record's producing-day rate
+    bopd = prod["bopd"].to_numpy(dtype=float)                      # as-reported rate (for display)
+
+    # Calendar-day volumes (bbl) over each record's real span.
+    potential_vol = pot_rate * cal
+    actual_vol = up_rate * prod_days
+    gap = np.maximum(potential_vol - actual_vol, 0.0)
+
+    # Deadband: ignore gaps within measurement/normal-variation noise of potential.
+    counts = gap > (DEADBAND_FRAC * potential_vol)
     total = np.where(counts, gap, 0.0)
-    downtime = np.minimum(pot * (1.0 - r), total)
-    rate = total - downtime
+
+    # Structural, exact split (both terms ≥ 0): downtime = lost calendar time at
+    # capability; underperformance = rate shortfall over the producing time.
+    downtime = np.maximum(pot_rate * (cal - prod_days), 0.0)
+    rate = np.maximum((pot_rate - up_rate) * prod_days, 0.0)
+    # Renormalize to the deadbanded total so the two buckets always sum to `total`
+    # (and both vanish together when the gap is within the deadband).
+    split_sum = downtime + rate
+    scale = np.divide(total, split_sum, out=np.zeros_like(total), where=split_sum > 0)
+    downtime = downtime * scale
+    rate = rate * scale
 
     out = pd.DataFrame({
         "well_id": well_id,
         "date": prod["date"].values,
         "bopd": bopd,
         "runtime_pct": prod["runtime_pct"].to_numpy(dtype=float),
-        "potential": pot,
-        "downtime_def": downtime,
-        "rate_def": rate,
-        "total_def": total,
+        "potential": pot_rate,                 # producing-day capability RATE (BOPD) — for charts
+        "span_days": cal,                      # calendar days this record covers
+        "producing_days": prod_days,           # producing days within the span (downtime = span − this)
+        "potential_vol": potential_vol,        # bbl the well could make over the calendar span
+        "actual_vol": actual_vol,              # bbl actually made over the span
+        "downtime_def": downtime,              # bbl lost to downtime (span − producing days)
+        "rate_def": rate,                      # bbl lost to underperformance while up
+        "total_def": total,                    # bbl deferred (downtime + rate), deadbanded
     })
     return out
 
@@ -73,10 +124,11 @@ def _reason_for_day(well_id: str, date, ev_by_well: dict) -> str:
 def compute_deferment(fleet: dict[str, pd.DataFrame], events: pd.DataFrame,
                       price_per_bbl: float = 70.0, use_llm: bool = False,
                       client=None, model: str = "claude-sonnet-4-6") -> pd.DataFrame:
-    """Daily deferment table for the whole fleet, attributed + priced.
+    """Per-record deferment table for the whole fleet, attributed + priced.
 
-    Returns one row per well-day with potential, the downtime/rate split, the assigned
-    reason code (+ label, recoverable, planned flags), and deferred $.
+    Returns one row per well-record with the potential rate, the calendar-day
+    downtime/rate volume split (bbl), the assigned reason code (+ label, recoverable,
+    planned flags), and deferred $. Cadence-aware — correct for daily and monthly inputs.
     """
     ev = events if "reason_key" in events.columns else _attribution_lookup(events, use_llm, client, model)
     ev_by_well: dict[str, list] = {}
